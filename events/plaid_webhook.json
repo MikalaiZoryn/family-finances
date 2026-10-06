@@ -1,0 +1,24 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /webhooks/plaid",
+  "rawPath": "/webhooks/plaid",
+  "rawQueryString": "",
+  "headers": {
+    "content-type": "application/json",
+    "plaid-verification": "eyJhbGciOiJFUzI1NiJ9.placeholder.signature"
+  },
+  "requestContext": {
+    "http": {
+      "method": "POST",
+      "path": "/webhooks/plaid",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1",
+      "userAgent": "Plaid Verifier"
+    },
+    "requestId": "local-plaid-request",
+    "routeKey": "POST /webhooks/plaid",
+    "stage": "$default"
+  },
+  "body": "{\"webhook_type\":\"TRANSACTIONS\",\"webhook_code\":\"SYNC_UPDATES_AVAILABLE\",\"item_id\":\"sandbox-item-id\",\"initial_update_complete\":true,\"historical_update_complete\":true,\"environment\":\"sandbox\"}",
+  "isBase64Encoded": false
+}

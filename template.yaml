@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Family Finances - Plaid transaction sync and Telegram categorization bot.
+
+Parameters:
+  AllowedTelegramUserIds:
+    Type: String
+    Default: ""
+    Description: Comma-separated numeric Telegram user IDs allowed to use the bot.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures:
+      - arm64
+    MemorySize: 128
+    Timeout: 10
+    Layers:
+      - !Ref SharedLayer
+    LoggingConfig:
+      LogFormat: JSON
+      ApplicationLogLevel: INFO
+      SystemLogLevel: WARN
+
+Resources:
+  # ------------------------------------------------------------------
+  # HTTP API (webhook endpoints)
+  # ------------------------------------------------------------------
+  WebhookApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+
+  # ------------------------------------------------------------------
+  # Shared code layer
+  # ------------------------------------------------------------------
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub ${AWS::StackName}-shared
+      ContentUri: src/shared/
+      CompatibleRuntimes:
+        - python3.13
+      CompatibleArchitectures:
+        - arm64
+    Metadata:
+      BuildMethod: python3.13
+      BuildArchitecture: arm64
+
+  # ------------------------------------------------------------------
+  # DynamoDB
+  # ------------------------------------------------------------------
+  TransactionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: transaction_id
+          AttributeType: S
+        - AttributeName: expense_category
+          AttributeType: S
+        - AttributeName: transaction_date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: transaction_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        # Sparse: expense_category is absent until the user categorizes the
+        # transaction, so only categorized transactions are indexed.
+        - IndexName: CategoryDateIndex
+          KeySchema:
+            - AttributeName: expense_category
+              KeyType: HASH
+            - AttributeName: transaction_date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  PlaidItemsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: item_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: item_id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ------------------------------------------------------------------
+  # Secrets (placeholder values - set real values after first deploy)
+  # ------------------------------------------------------------------
+  PlaidSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub ${AWS::StackName}/plaid
+      Description: Plaid API credentials and per-item access tokens.
+      SecretString: '{"client_id":"REPLACE_ME","secret":"REPLACE_ME","env":"sandbox","access_tokens":{}}'
+
+  TelegramSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub ${AWS::StackName}/telegram
+      Description: Telegram bot token and webhook secret token.
+      GenerateSecretString:
+        SecretStringTemplate: '{"bot_token":"REPLACE_ME"}'
+        GenerateStringKey: webhook_secret_token
+        PasswordLength: 48
+        ExcludePunctuation: true
+
+  # ------------------------------------------------------------------
+  # Lambda functions
+  # ------------------------------------------------------------------
+  PlaidSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-plaid-sync
+      RetentionInDays: 30
+
+  PlaidSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/plaid_sync/
+      Handler: app.lambda_handler
+      LoggingConfig:
+        LogGroup: !Ref PlaidSyncLogGroup
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          PLAID_ITEMS_TABLE: !Ref PlaidItemsTable
+          PLAID_SECRET_ARN: !Ref PlaidSecret
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PlaidItemsTable
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref PlaidSecret
+      Events:
+        PlaidWebhook:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WebhookApi
+            Method: POST
+            Path: /webhooks/plaid
+
+  TelegramBotLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-telegram-bot
+      RetentionInDays: 30
+
+  TelegramBotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/telegram_bot/
+      Handler: app.lambda_handler
+      LoggingConfig:
+        LogGroup: !Ref TelegramBotLogGroup
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          TELEGRAM_SECRET_ARN: !Ref TelegramSecret
+          ALLOWED_TELEGRAM_USER_IDS: !Ref AllowedTelegramUserIds
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref TelegramSecret
+      Events:
+        TelegramWebhook:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WebhookApi
+            Method: POST
+            Path: /webhooks/telegram
+
+Outputs:
+  PlaidWebhookUrl:
+    Description: URL to register as the Plaid webhook.
+    Value: !Sub https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/webhooks/plaid
+  TelegramWebhookUrl:
+    Description: URL to register with Telegram setWebhook.
+    Value: !Sub https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/webhooks/telegram
+  TransactionsTableName:
+    Value: !Ref TransactionsTable
+  PlaidItemsTableName:
+    Value: !Ref PlaidItemsTable
+  PlaidSecretArn:
+    Value: !Ref PlaidSecret
+  TelegramSecretArn:
+    Value: !Ref TelegramSecret
