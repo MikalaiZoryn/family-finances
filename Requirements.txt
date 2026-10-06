@@ -1,0 +1,256 @@
+Family Finances Service
+Requirements & Basic Architecture
+===================================
+
+1. Purpose
+----------
+A small serverless service for collecting family financial transactions through
+Plaid and managing transaction categorization through a private Telegram bot.
+
+The initial version should be simple, low-maintenance, and fully deployed on AWS
+using infrastructure as code.
+
+2. In Scope
+-----------
+1. Transaction synchronization
+   - Connect supported bank and credit-card accounts through Plaid.
+   - Use Plaid webhooks to detect available transaction updates.
+   - Use AWS Lambda to call Plaid Transactions Sync API.
+   - Maintain a Plaid sync cursor for incremental synchronization.
+   - Process added, modified, and removed transactions.
+   - Handle finalized (posted) transactions.
+   - Identify transactions that require user categorization.
+
+2. Transaction storage
+   - Store normalized transactions in DynamoDB.
+   - Use the Plaid transaction ID as the transaction identifier.
+   - Store transaction status, amount, date, merchant, account, category,
+     and other fields required for synchronization and categorization.
+   - Store the custom category selected by the user separately from Plaid's
+     original category.
+   - DynamoDB is the source of truth for transactions.
+
+3. Telegram transaction categorization
+   - Send finalized transactions that do not have a custom category to the
+     Telegram bot.
+   - Include the transaction information and a list of possible categories.
+   - Use Telegram inline buttons for category selection.
+   - When the user clicks a category, Telegram sends the callback to the
+     application.
+   - AWS Lambda processes the callback and updates the transaction in DynamoDB.
+   - The bot should confirm the selected category.
+   - A transaction should not be repeatedly sent for categorization after it
+     has been categorized.
+
+4. Telegram bot
+   - Implement the bot using the Telegram Bot API.
+   - Receive Telegram webhook requests through API Gateway.
+   - Process commands and callback queries through AWS Lambda.
+   - Initially support the transaction categorization workflow.
+   - Keep the bot private and restrict access to configured Telegram users.
+
+5. AWS infrastructure as code
+   - Use AWS SAM (Serverless Application Model).
+   - All AWS resources required by the service must be defined in SAM templates.
+   - Infrastructure should be reproducible from source control.
+   - Avoid manual AWS resource configuration wherever practical.
+
+6. CI/CD
+   - Use GitHub Actions.
+   - Build and test the application on pull requests and/or pushes.
+   - Deploy the SAM application from GitHub Actions.
+   - AWS credentials must not be stored as long-lived secrets in the repository.
+   - Prefer GitHub Actions OIDC with an AWS IAM deployment role.
+
+7. IAM, API Gateway, and secrets
+   - Use IAM roles with least-privilege permissions.
+   - Use API Gateway as the HTTPS endpoint for Plaid and Telegram webhooks.
+   - Store Telegram bot tokens and Plaid secrets/access credentials in AWS
+     Secrets Manager.
+   - Do not store secret tokens in source code, SAM templates, or DynamoDB.
+   - Lambda functions should receive only the permissions they require.
+
+3. Basic Architecture
+---------------------
+
+                         Bank Accounts / Cards
+                                  |
+                                  v
+                               Plaid
+                                  |
+                     Transaction webhook
+                                  |
+                                  v
+                         API Gateway
+                                  |
+                                  v
+                         Plaid Sync Lambda
+                                  |
+                         Plaid Transactions
+                              Sync API
+                                  |
+                                  v
+                            DynamoDB
+                       +--------------------+
+                       | Transactions       |
+                       | Plaid cursors      |
+                       | Custom categories  |
+                       +--------------------+
+                                  |
+                                  | finalized + uncategorized
+                                  v
+                         Telegram Bot Lambda
+                                  |
+                                  v
+                         Telegram Bot API
+                                  |
+                                  v
+                              User
+                                  |
+                         category button
+                                  |
+                                  v
+                         Telegram webhook
+                                  |
+                                  v
+                         API Gateway
+                                  |
+                                  v
+                         Telegram Bot Lambda
+                                  |
+                                  v
+                            DynamoDB
+                       update transaction
+                       custom category
+
+
+4. Main AWS Components
+----------------------
+
+API Gateway
+- HTTPS webhook endpoints.
+- Endpoint for Plaid webhooks.
+- Endpoint for Telegram webhooks.
+
+Lambda
+- Plaid Sync Lambda:
+  Synchronizes transactions using Plaid's cursor-based Transactions Sync API.
+- Telegram Lambda:
+  Sends transaction messages and processes Telegram callback queries.
+  It may also handle Telegram commands.
+
+DynamoDB
+- Transaction records.
+- Plaid Item/synchronization cursor information.
+- Custom transaction categories.
+- Minimal Telegram user/access configuration if required.
+
+Secrets Manager
+- Plaid client secret and other sensitive Plaid credentials.
+- Telegram bot token.
+- Secrets are retrieved by Lambda at runtime.
+
+IAM
+- Lambda execution roles.
+- Permissions for DynamoDB, Secrets Manager, CloudWatch Logs, and required
+  AWS services.
+- Separate deployment role for GitHub Actions.
+
+CloudWatch
+- Lambda logs.
+- Basic operational monitoring and troubleshooting.
+
+SAM
+- Defines Lambda functions, API Gateway, DynamoDB, IAM, permissions,
+  environment configuration, and other AWS resources.
+
+
+5. Transaction Synchronization Flow
+-----------------------------------
+
+1. A bank makes new or changed transactions available through Plaid.
+2. Plaid sends a webhook to API Gateway.
+3. API Gateway invokes the Plaid Sync Lambda.
+4. Lambda retrieves the stored cursor for the Plaid Item.
+5. Lambda calls Plaid Transactions Sync API.
+6. Lambda processes added, modified, and removed transactions.
+7. Lambda stores/updates transactions in DynamoDB.
+8. Lambda stores the new cursor.
+9. Finalized transactions without a custom category become candidates for
+   Telegram categorization.
+
+A periodic scheduled sync can be added later as a safety mechanism, but it is
+not part of the initial required scope.
+
+
+6. Transaction Categorization Flow
+----------------------------------
+
+1. A finalized transaction without a custom category is selected.
+2. Telegram Bot Lambda sends a Telegram message containing:
+   - merchant/description
+   - amount
+   - date
+   - possible categories
+3. Categories are represented as Telegram inline buttons.
+4. User selects a category.
+5. Telegram sends a callback query to the webhook.
+6. Telegram Lambda validates the request and identifies the transaction.
+7. Lambda updates the transaction's custom category in DynamoDB.
+8. Bot confirms the selected category.
+9. The transaction is no longer considered uncategorized.
+
+
+7. Security Requirements
+------------------------
+
+- All external webhook communication must use HTTPS.
+- Telegram webhook requests must be validated using Telegram's webhook
+  secret-token mechanism.
+- Plaid webhook authenticity/verification should be implemented according
+  to Plaid's current webhook security recommendations.
+- Telegram user access should be restricted to explicitly configured users.
+- Authorization should use Telegram's stable numeric user ID rather than
+  username.
+- IAM policies must follow least privilege.
+- Secrets must be stored in AWS Secrets Manager.
+- No financial credentials or bot tokens may be committed to GitHub.
+- DynamoDB must not be publicly accessible.
+
+
+8. Suggested Repository Structure
+---------------------------------
+
+family-finances/
+|
++-- template.yaml
++-- src/
+|   +-- plaid-sync/
+|   +-- telegram-bot/
+|   +-- shared/
+|
++-- tests/
+|
++-- .github/
+|   +-- workflows/
+|       +-- ci.yml
+|       +-- deploy.yml
+|
++-- README.md
+
+
+9. Non-Goals for Initial Version
+--------------------------------
+
+The following are intentionally excluded from the initial implementation:
+
+- AI/Claude-based financial analysis.
+- Budget calculations and budget notifications.
+- Web/mobile UI.
+- Complex reporting and dashboards.
+- Automatic transaction categorization using AI.
+- Support for multiple unrelated families/tenants.
+- Manual editing through a web interface.
+
+The architecture should remain extensible so these capabilities can be added
+later without redesigning transaction storage or the Telegram integration.
