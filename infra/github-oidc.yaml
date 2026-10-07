@@ -8,9 +8,17 @@ Parameters:
   GitHubOrg:
     Type: String
     Default: MikalaiZoryn
+  GitHubOrgId:
+    Type: String
+    Default: "152463320"
+    Description: Numeric GitHub owner ID, included in the OIDC token subject.
   GitHubRepo:
     Type: String
     Default: family-finances
+  GitHubRepoId:
+    Type: String
+    Default: "1406816094"
+    Description: Numeric GitHub repository ID, included in the OIDC token subject.
   GitHubEnvironment:
     Type: String
     Default: production
@@ -191,7 +199,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:${GitHubEnvironment}
+                # GitHub embeds immutable owner/repo IDs in the subject, so a
+                # deleted-and-recreated repo with the same name cannot assume this role.
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:${GitHubEnvironment}
       Policies:
         - PolicyName: SamDeploy
           PolicyDocument:
