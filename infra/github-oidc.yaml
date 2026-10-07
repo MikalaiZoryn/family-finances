@@ -128,6 +128,8 @@ Resources:
                   - apigateway:PUT
                   - apigateway:PATCH
                   - apigateway:DELETE
+                  - apigateway:TagResource
+                  - apigateway:UntagResource
                 Resource:
                   - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis
                   - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*
