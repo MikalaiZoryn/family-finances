@@ -1,4 +1,4 @@
-# Family Finances
+# Family Finances v1
 
 Serverless service that syncs family transactions from Plaid into DynamoDB and
 asks for their categories through a private Telegram bot. See
