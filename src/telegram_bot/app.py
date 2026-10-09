@@ -28,7 +28,13 @@ CATEGORIES = {
     "essential": "Essential",
     "weekend_fun": "Weekend Fun",
     "hobby": "Hobby",
+    "sport": "Sport",
+    "subscription": "Subscription",
+    "investment": "Investment",
+    "vacation": "Vacation",
+    "miscellaneous": "Miscellaneous",
 }
+BUTTONS_PER_ROW = 2
 CALLBACK_PREFIX = "cat"
 MAX_CALLBACK_DATA_BYTES = 64
 
@@ -90,10 +96,13 @@ def callback_data(transaction_id: str, category_key: str) -> str:
 
 
 def category_keyboard(transaction_id: str) -> dict[str, Any]:
+    buttons = [
+        {"text": label, "callback_data": callback_data(transaction_id, key)}
+        for key, label in CATEGORIES.items()
+    ]
     return {
         "inline_keyboard": [
-            [{"text": label, "callback_data": callback_data(transaction_id, key)}]
-            for key, label in CATEGORIES.items()
+            buttons[i : i + BUTTONS_PER_ROW] for i in range(0, len(buttons), BUTTONS_PER_ROW)
         ]
     }
 

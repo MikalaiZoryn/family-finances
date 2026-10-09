@@ -212,9 +212,22 @@ def test_message_content_and_buttons(aws, telegram):
     assert "Checking ••0000" in text
     assert message["reply_markup"] == {
         "inline_keyboard": [
-            [{"text": "Essential", "callback_data": "cat:t1:essential"}],
-            [{"text": "Weekend Fun", "callback_data": "cat:t1:weekend_fun"}],
-            [{"text": "Hobby", "callback_data": "cat:t1:hobby"}],
+            [
+                {"text": "Essential", "callback_data": "cat:t1:essential"},
+                {"text": "Weekend Fun", "callback_data": "cat:t1:weekend_fun"},
+            ],
+            [
+                {"text": "Hobby", "callback_data": "cat:t1:hobby"},
+                {"text": "Sport", "callback_data": "cat:t1:sport"},
+            ],
+            [
+                {"text": "Subscription", "callback_data": "cat:t1:subscription"},
+                {"text": "Investment", "callback_data": "cat:t1:investment"},
+            ],
+            [
+                {"text": "Vacation", "callback_data": "cat:t1:vacation"},
+                {"text": "Miscellaneous", "callback_data": "cat:t1:miscellaneous"},
+            ],
         ]
     }
 

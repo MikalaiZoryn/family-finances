@@ -83,8 +83,11 @@ is recorded. Older transactions are skipped on every later sync too.
 ## Telegram categorization
 
 Categories are defined in `src/telegram_bot/app.py` (`CATEGORIES`): `essential`
-(Essential), `weekend_fun` (Weekend Fun), `hobby` (Hobby). The key is stored in
-`expense_category`; the label is shown on the buttons.
+(Essential), `weekend_fun` (Weekend Fun), `hobby` (Hobby), `sport` (Sport),
+`subscription` (Subscription), `investment` (Investment), `vacation`
+(Vacation), `miscellaneous`
+(Miscellaneous). The key is stored in `expense_category`; the label is shown on
+the buttons, two per row (`BUTTONS_PER_ROW`).
 
 **Sending** — any non-HTTP invoke (manual now, a schedule later) scans for
 transactions without `expense_category` and `telegram_message_id`, keeps only
@@ -107,7 +110,7 @@ saved on the posted transaction.
 ## Local development
 
 ```bash
-python -m venv .venv
+python -m venv .venvtelg
 . .venv/Scripts/activate        # Windows (Git Bash); use .venv/bin/activate on Linux/macOS
 pip install -r requirements-dev.txt
 ruff check .
