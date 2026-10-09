@@ -8,6 +8,10 @@ Parameters:
     Type: String
     Default: ""
     Description: Comma-separated numeric Telegram user IDs allowed to use the bot.
+  TelegramChatId:
+    Type: String
+    Default: ""
+    Description: Telegram chat ID that receives transactions to categorize (private chat or group).
 
 Globals:
   Function:
@@ -174,6 +178,8 @@ Resources:
     Properties:
       CodeUri: src/telegram_bot/
       Handler: app.lambda_handler
+      # Room for the send run (up to MAX_MESSAGES_PER_RUN messages, rate limited by Telegram).
+      Timeout: 60
       LoggingConfig:
         LogGroup: !Ref TelegramBotLogGroup
       Environment:
@@ -181,6 +187,8 @@ Resources:
           TRANSACTIONS_TABLE: !Ref TransactionsTable
           TELEGRAM_SECRET_ARN: !Ref TelegramSecret
           ALLOWED_TELEGRAM_USER_IDS: !Ref AllowedTelegramUserIds
+          TELEGRAM_CHAT_ID: !Ref TelegramChatId
+          MAX_MESSAGES_PER_RUN: "20"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TransactionsTable

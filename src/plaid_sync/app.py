@@ -29,6 +29,15 @@ SYNC_WEBHOOK_CODES = {
     "DEFAULT_UPDATE",
 }
 MAX_PAGINATION_RESTARTS = 3
+# User/bot fields copied from a pending transaction to its posted replacement.
+CARRY_OVER_ATTRIBUTES = (
+    "expense_category",
+    "categorized_at",
+    "categorized_by",
+    "telegram_message_id",
+    "telegram_chat_id",
+    "telegram_sent_at",
+)
 
 _dynamodb = None
 
@@ -121,9 +130,12 @@ def sync_item(item_id: str) -> dict[str, Any]:
         if sync_start_date and txn["date"] < sync_start_date:
             skipped += 1
             continue
-        _upsert_transaction(transactions_table, to_item(txn, item_id, page["accounts"]))
+        item = to_item(txn, item_id, page["accounts"])
+        carry_over = _pending_carry_over(transactions_table, item.get("pending_transaction_id"))
+        _upsert_transaction(transactions_table, item, carry_over)
         upserted += 1
 
+    # Deleted after the upserts so posted transactions can inherit from their pending rows.
     # Dedupe keys: BatchWriteItem rejects duplicate keys in one request.
     with transactions_table.batch_writer(overwrite_by_pkeys=["transaction_id"]) as batch:
         for removed in page["removed"]:
@@ -201,8 +213,21 @@ def to_item(txn: dict[str, Any], item_id: str, accounts: dict[str, Any]) -> dict
     return {k: v for k, v in item.items() if v is not None}
 
 
-def _upsert_transaction(table, item: dict[str, Any]) -> None:
-    """Update only Plaid-owned fields, preserving user/bot fields like expense_category."""
+def _pending_carry_over(table, pending_transaction_id: str | None) -> dict[str, Any]:
+    """User/bot fields of the pending transaction that this posted transaction replaces."""
+    if not pending_transaction_id:
+        return {}
+    pending = table.get_item(Key={"transaction_id": pending_transaction_id}).get("Item") or {}
+    return {k: pending[k] for k in CARRY_OVER_ATTRIBUTES if k in pending}
+
+
+def _upsert_transaction(
+    table, item: dict[str, Any], carry_over: dict[str, Any] | None = None
+) -> None:
+    """Update only Plaid-owned fields, preserving user/bot fields like expense_category.
+
+    carry_over attributes are set only if the item does not already have them.
+    """
     names = {"#updated_at": "updated_at", "#created_at": "created_at"}
     values: dict[str, Any] = {":now": _now()}
     sets = ["#updated_at = :now", "#created_at = if_not_exists(#created_at, :now)"]
@@ -212,6 +237,10 @@ def _upsert_transaction(table, item: dict[str, Any]) -> None:
         names[f"#a{i}"] = attr
         values[f":v{i}"] = value
         sets.append(f"#a{i} = :v{i}")
+    for i, (attr, value) in enumerate((carry_over or {}).items()):
+        names[f"#c{i}"] = attr
+        values[f":c{i}"] = value
+        sets.append(f"#c{i} = if_not_exists(#c{i}, :c{i})")
     table.update_item(
         Key={"transaction_id": item["transaction_id"]},
         UpdateExpression="SET " + ", ".join(sets),

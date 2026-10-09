@@ -61,4 +61,6 @@ jobs:
           --no-fail-on-empty-changeset
           --s3-bucket "${{ vars.SAM_ARTIFACTS_BUCKET }}"
           --role-arn "${{ vars.CFN_EXECUTION_ROLE_ARN }}"
-          --parameter-overrides "AllowedTelegramUserIds=${{ vars.ALLOWED_TELEGRAM_USER_IDS }}"
+          --parameter-overrides
+          "AllowedTelegramUserIds=${{ vars.ALLOWED_TELEGRAM_USER_IDS }}"
+          "TelegramChatId=${{ vars.TELEGRAM_CHAT_ID }}"

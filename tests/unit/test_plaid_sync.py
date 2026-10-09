@@ -199,6 +199,54 @@ def test_removed_transactions_are_deleted(aws, plaid):
     assert get_txn(aws, "t1") is None
 
 
+def test_posted_transaction_inherits_category_from_pending(aws, plaid):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "cursor": "cursor-1"})
+    aws["transactions"].put_item(
+        Item={
+            "transaction_id": "pending-1",
+            "status": "pending",
+            "expense_category": "essential",
+            "categorized_by": 123,
+            "telegram_message_id": 42,
+            "telegram_chat_id": 555,
+        }
+    )
+    plaid.responses = [
+        page(
+            added=[txn("posted-1", pending_transaction_id="pending-1")],
+            removed=["pending-1"],
+            next_cursor="cursor-2",
+        )
+    ]
+
+    app.sync_item(ITEM_ID)
+
+    posted = get_txn(aws, "posted-1")
+    assert posted["status"] == "posted"
+    assert posted["expense_category"] == "essential"
+    assert posted["categorized_by"] == 123
+    assert posted["telegram_message_id"] == 42
+    assert posted["telegram_chat_id"] == 555
+    assert get_txn(aws, "pending-1") is None
+
+
+def test_carry_over_does_not_overwrite_posted_fields(aws, plaid):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "cursor": "cursor-1"})
+    aws["transactions"].put_item(
+        Item={"transaction_id": "pending-1", "expense_category": "hobby"}
+    )
+    aws["transactions"].put_item(
+        Item={"transaction_id": "posted-1", "expense_category": "essential"}
+    )
+    plaid.responses = [
+        page(modified=[txn("posted-1", pending_transaction_id="pending-1")], next_cursor="c2")
+    ]
+
+    app.sync_item(ITEM_ID)
+
+    assert get_txn(aws, "posted-1")["expense_category"] == "essential"
+
+
 def test_paginates_until_has_more_is_false(aws, plaid):
     plaid.responses = [
         page(added=[txn("t1")], next_cursor="c1", has_more=True),

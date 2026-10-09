@@ -4,7 +4,8 @@ Serverless service that syncs family transactions from Plaid into DynamoDB and
 asks for their categories through a private Telegram bot. See
 [Requirements.txt](Requirements.txt) for the full requirements.
 
-> Status: Plaid sync Lambda implemented (sandbox). Telegram Lambda is a stub.
+> Status: Plaid sync Lambda implemented (sandbox). Telegram Lambda sends
+> uncategorized expenses and saves the chosen category (no schedule yet).
 > Plaid webhook signature verification is not implemented yet.
 
 ## Layout
@@ -36,11 +37,18 @@ tests/                     Unit tests
 | `plaid_category_primary`, `plaid_category_detailed` | Plaid `personal_finance_category`      |
 | `created_at`, `updated_at` | ISO UTC timestamps                                              |
 | `expense_category`    | **Absent** until the user categorizes it (never stored as NULL)      |
-| `telegram_message_id` | Set when the transaction was sent to Telegram, prevents re-sending   |
+| `telegram_message_id`, `telegram_chat_id`, `telegram_sent_at` | Set when sent to Telegram; prevents re-sending |
+| `categorized_at`, `categorized_by` | When and by which Telegram user ID the category was chosen |
 
 Plaid fields that are null are omitted. The sync only `SET`s Plaid-owned
-attributes, so `expense_category` and `telegram_message_id` survive updates.
+attributes, so `expense_category` and `telegram_*` fields survive updates.
 Transactions Plaid reports as removed are deleted.
+
+When a pending transaction posts, Plaid gives it a new `transaction_id` (with
+`pending_transaction_id` pointing at the old one) and removes the pending one.
+The sync copies `expense_category`, `categorized_*` and `telegram_*` from the
+pending row to the posted row (without overwriting), so a category chosen while
+pending is kept and the transaction is not sent again.
 
 GSI `CategoryDateIndex` (`expense_category`, `transaction_date`) is sparse and
 contains only categorized transactions. Monthly totals = one query per category
@@ -72,6 +80,30 @@ On the first sync of an Item (no row or no cursor), only the last
 `INITIAL_SYNC_DAYS` (default 30) of history is requested, and `sync_start_date`
 is recorded. Older transactions are skipped on every later sync too.
 
+## Telegram categorization
+
+Categories are defined in `src/telegram_bot/app.py` (`CATEGORIES`): `essential`
+(Essential), `weekend_fun` (Weekend Fun), `hobby` (Hobby). The key is stored in
+`expense_category`; the label is shown on the buttons.
+
+**Sending** — any non-HTTP invoke (manual now, a schedule later) scans for
+transactions without `expense_category` and `telegram_message_id`, keeps only
+expenses (`amount > 0`, pending or posted) and skips transfers
+(`TRANSFER_IN` / `TRANSFER_OUT`), income/payroll (`INCOME`) and credit card
+payments (`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`). Oldest first, at most
+`MAX_MESSAGES_PER_RUN` (20) per run go to `TELEGRAM_CHAT_ID`, one message per
+transaction with a button per category.
+
+```bash
+aws lambda invoke --function-name <TelegramBotFunction name>   --cli-binary-format raw-in-base64-out --payload '{}' out.json
+```
+
+**Button press** — Telegram calls the webhook; the Lambda checks the
+`X-Telegram-Bot-Api-Secret-Token` header and that the user is in
+`ALLOWED_TELEGRAM_USER_IDS`, saves the category, and edits the message to show
+it (buttons removed). A press on a pending transaction that has since posted is
+saved on the posted transaction.
+
 ## Local development
 
 ```bash
@@ -89,6 +121,7 @@ sam validate --lint
 sam build
 sam local invoke PlaidSyncFunction -e events/plaid_webhook.json
 sam local invoke TelegramBotFunction -e events/telegram_update.json
+sam local invoke TelegramBotFunction -e events/telegram_send.json
 ```
 
 ## First-time AWS setup
@@ -117,6 +150,7 @@ sam local invoke TelegramBotFunction -e events/telegram_update.json
    | `CFN_EXECUTION_ROLE_ARN`    | bootstrap output `CloudFormationExecutionRoleArn` |
    | `SAM_ARTIFACTS_BUCKET`      | bootstrap output `SamArtifactsBucketName`      |
    | `ALLOWED_TELEGRAM_USER_IDS` | comma-separated numeric Telegram user IDs      |
+   | `TELEGRAM_CHAT_ID`          | chat that receives transactions (see below)    |
 
    No AWS secrets are stored in GitHub — the workflow uses OIDC.
 
@@ -127,6 +161,12 @@ sam local invoke TelegramBotFunction -e events/telegram_update.json
    - `family-finances/telegram` — set `bot_token`. `webhook_secret_token` is
      generated automatically; pass it as `secret_token` when calling Telegram
      `setWebhook` with the `TelegramWebhookUrl` stack output.
+
+5. **Find the Telegram chat ID**: send any message to the bot (or add it to a
+   family group and post there) *before* registering the webhook, then open
+   `https://api.telegram.org/bot<bot_token>/getUpdates` and copy
+   `message.chat.id` (negative for groups). For a private chat it equals your
+   user ID. Set it as the `TELEGRAM_CHAT_ID` variable and redeploy.
 
    Secrets, tables and their data are retained if the stack is deleted.
 
