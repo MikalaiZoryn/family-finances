@@ -5,7 +5,9 @@ asks for their categories through a private Telegram bot. See
 [Requirements.txt](Requirements.txt) for the full requirements.
 
 > Status: Plaid sync Lambda implemented (sandbox). Telegram Lambda sends
-> uncategorized expenses and saves the chosen category (no schedule yet).
+> uncategorized expenses and saves the chosen category. Aggregation Lambda
+> totals categorized expenses against monthly budgets and posts a report
+> (no schedules yet; all runs are manual invokes).
 > Plaid webhook signature verification is not implemented yet.
 
 ## Layout
@@ -16,6 +18,7 @@ samconfig.toml             SAM CLI defaults (stack family-finances, us-east-1)
 infra/github-oidc.yaml     One-time bootstrap: GitHub OIDC, deploy roles, artifacts bucket
 src/plaid_sync/            Plaid webhook Lambda
 src/telegram_bot/          Telegram webhook Lambda
+src/aggregation/           Monthly budget aggregation Lambda
 src/shared/                Lambda layer with shared code (import as `shared`)
 events/                    Sample API Gateway events for `sam local invoke`
 scripts/plaid_sandbox.py   Link a Plaid sandbox Item, fire webhooks, refresh transactions
@@ -67,6 +70,21 @@ with `transaction_date BETWEEN 'YYYY-MM-01' AND 'YYYY-MM-31'`.
 Access tokens are **not** stored here; they live in the Plaid secret under
 `access_tokens.<item_id>`.
 
+`CategoryLimitsTable` — partition key `category` (category key, e.g. `essential`).
+
+| Attribute | Notes                                                              |
+|-----------|--------------------------------------------------------------------|
+| `limit`   | Monthly limit; `-1` = no limit. A category without a row has no limit |
+
+`CategoryStateTable` — partition key `category`, sort key `month` (`YYYY-MM`).
+
+| Attribute          | Notes                                                           |
+|--------------------|-----------------------------------------------------------------|
+| `limit`            | Limit in force when the month's row was created                 |
+| `budget`           | Budget for the month; `-1` = no limit. May be negative after overspending |
+| `current_expenses` | Sum of categorized transaction amounts dated in the month       |
+| `updated_at`       | ISO UTC timestamp of the last aggregation                        |
+
 ## Plaid sync
 
 A `TRANSACTIONS` webhook with code `SYNC_UPDATES_AVAILABLE`, `INITIAL_UPDATE`,
@@ -107,6 +125,41 @@ aws lambda invoke --function-name <TelegramBotFunction name>   --cli-binary-form
 it (buttons removed). A press on a pending transaction that has since posted is
 saved on the posted transaction.
 
+## Budget aggregation
+
+Categories are shared via `src/shared/shared/categories.py`. Limits are set
+manually in `CategoryLimitsTable` (no bot commands yet):
+
+```bash
+aws dynamodb put-item --table-name <CategoryLimitsTableName> \
+  --item '{"category":{"S":"essential"},"limit":{"N":"1000"}}'
+```
+
+Each run (`{}` = current UTC month, or `{"month": "YYYY-MM"}`) does this for every category:
+
+1. Recompute the previous month's `current_expenses`, so transactions from last
+   month that were categorized late still count.
+2. Write the month's row with `budget` and `current_expenses`.
+3. Post a report to `TELEGRAM_CHAT_ID`.
+
+Expenses are summed from `CategoryDateIndex`.
+
+Budget rules (`P` = previous month's row):
+
+- limit `-1` → budget `-1` (no limit)
+- limit set, and either no `P` or `P` had no limit → budget = limit
+- limit set and `P` had a limit → budget = `P.budget − P.current_expenses + limit`
+  (overspending carries over and can make the budget negative)
+
+The limit is captured when a month's row is first created, so a limit change
+applies from the next month. If a month was never aggregated, the following
+month starts fresh at the limit. Runs are idempotent.
+
+```bash
+aws lambda invoke --function-name <AggregationFunction name> \
+  --cli-binary-format raw-in-base64-out --payload '{}' out.json
+```
+
 ## Local development
 
 ```bash
@@ -125,6 +178,7 @@ sam build
 sam local invoke PlaidSyncFunction -e events/plaid_webhook.json
 sam local invoke TelegramBotFunction -e events/telegram_update.json
 sam local invoke TelegramBotFunction -e events/telegram_send.json
+sam local invoke AggregationFunction -e events/aggregation_run.json
 ```
 
 ## First-time AWS setup

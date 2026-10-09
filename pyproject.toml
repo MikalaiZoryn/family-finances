@@ -16,4 +16,4 @@ line-length = 100
 select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["shared", "plaid_sync", "telegram_bot"]
+known-first-party = ["shared", "plaid_sync", "telegram_bot", "aggregation"]

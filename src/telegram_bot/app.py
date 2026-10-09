@@ -18,22 +18,12 @@ from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 
 from shared.aws_secrets import get_secret_json
+from shared.categories import CATEGORIES
 from shared.http import json_response
 from shared.telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger()
 
-# Key is stored in expense_category; label is shown on the buttons.
-CATEGORIES = {
-    "essential": "Essential",
-    "weekend_fun": "Weekend Fun",
-    "hobby": "Hobby",
-    "sport": "Sport",
-    "subscription": "Subscription",
-    "investment": "Investment",
-    "vacation": "Vacation",
-    "miscellaneous": "Miscellaneous",
-}
 BUTTONS_PER_ROW = 2
 CALLBACK_PREFIX = "cat"
 MAX_CALLBACK_DATA_BYTES = 64

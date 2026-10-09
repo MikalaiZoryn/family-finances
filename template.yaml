@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Family Finances - Plaid transaction sync and Telegram categorization bot.
+  Family Finances - Plaid transaction sync, Telegram categorization bot and
+  monthly budget aggregation.
 
 Parameters:
   AllowedTelegramUserIds:
@@ -99,6 +100,42 @@ Resources:
       KeySchema:
         - AttributeName: item_id
           KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # Monthly limit per category, set manually (-1 = no limit).
+  CategoryLimitsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: category
+          AttributeType: S
+      KeySchema:
+        - AttributeName: category
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # Budget and expenses per category per month (YYYY-MM), written by the aggregation.
+  CategoryStateTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: category
+          AttributeType: S
+        - AttributeName: month
+          AttributeType: S
+      KeySchema:
+        - AttributeName: category
+          KeyType: HASH
+        - AttributeName: month
+          KeyType: RANGE
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
 
@@ -202,6 +239,37 @@ Resources:
             Method: POST
             Path: /webhooks/telegram
 
+  AggregationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-aggregation
+      RetentionInDays: 30
+
+  AggregationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/aggregation/
+      Handler: app.lambda_handler
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref AggregationLogGroup
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          CATEGORY_LIMITS_TABLE: !Ref CategoryLimitsTable
+          CATEGORY_STATE_TABLE: !Ref CategoryStateTable
+          TELEGRAM_SECRET_ARN: !Ref TelegramSecret
+          TELEGRAM_CHAT_ID: !Ref TelegramChatId
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TransactionsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref CategoryLimitsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CategoryStateTable
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref TelegramSecret
+
 Outputs:
   PlaidWebhookUrl:
     Description: URL to register as the Plaid webhook.
@@ -213,6 +281,10 @@ Outputs:
     Value: !Ref TransactionsTable
   PlaidItemsTableName:
     Value: !Ref PlaidItemsTable
+  CategoryLimitsTableName:
+    Value: !Ref CategoryLimitsTable
+  CategoryStateTableName:
+    Value: !Ref CategoryStateTable
   PlaidSecretArn:
     Value: !Ref PlaidSecret
   TelegramSecretArn:
