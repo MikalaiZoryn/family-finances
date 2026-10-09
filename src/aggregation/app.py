@@ -177,7 +177,10 @@ def aggregate(month: str) -> list[dict[str, Any]]:
 
 
 def _money(value: Decimal) -> str:
-    return f"{value:,.2f}"
+    """Whole dollars, cents truncated: 1234.99 -> $1,234, -50.5 -> -$50."""
+    dollars = int(value)  # truncates toward zero
+    sign = "-" if dollars < 0 else ""
+    return f"{sign}${abs(dollars):,}"
 
 
 def format_report(month: str, rows: list[dict[str, Any]]) -> str:

@@ -301,12 +301,26 @@ def test_format_report():
     assert text.splitlines() == [
         "📊 <b>Budget · October 2026</b>",
         "",
-        "Essential: 812.40 / 1,000.00 · 187.60 left",
-        "Hobby: 120.00 / 100.00 · ⚠️ 20.00 over",
-        "Sport: 45.00 · no limit",
+        "Essential: $812 / $1,000 · $187 left",
+        "Hobby: $120 / $100 · ⚠️ $20 over",
+        "Sport: $45 · no limit",
         "",
-        "<b>Total spent: 977.40</b>",
+        "<b>Total spent: $977</b>",
     ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0", "$0"),
+        ("0.99", "$0"),
+        ("1234.99", "$1,234"),
+        ("1000000", "$1,000,000"),
+        ("-50.50", "-$50"),
+    ],
+)
+def test_money_truncates_cents(value, expected):
+    assert app._money(Decimal(value)) == expected
 
 
 def test_handler_sends_report(aws, telegram):
@@ -317,7 +331,7 @@ def test_handler_sends_report(aws, telegram):
 
     assert len(telegram.sent) == 1
     assert telegram.sent[0]["chat_id"] == str(CHAT_ID)
-    assert "Essential: 250.00 / 1,000.00 · 750.00 left" in telegram.sent[0]["text"]
+    assert "Essential: $250 / $1,000 · $750 left" in telegram.sent[0]["text"]
     assert result["month"] == "2026-10"
     assert result["categories"][0] == {
         "category": "essential",
