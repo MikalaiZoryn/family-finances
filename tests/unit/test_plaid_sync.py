@@ -252,6 +252,25 @@ def test_unknown_item_is_ignored(aws, plaid):
     assert aws["items"].scan()["Items"] == []
 
 
+@pytest.mark.parametrize(
+    "webhook_code",
+    ["SYNC_UPDATES_AVAILABLE", "INITIAL_UPDATE", "HISTORICAL_UPDATE", "DEFAULT_UPDATE"],
+)
+def test_transaction_update_webhooks_trigger_sync(aws, plaid, webhook_code):
+    plaid.responses = [page(added=[txn("t1")])]
+
+    response = app.lambda_handler(
+        webhook_event(
+            {"webhook_type": "TRANSACTIONS", "webhook_code": webhook_code, "item_id": ITEM_ID}
+        ),
+        None,
+    )
+
+    assert response["statusCode"] == 200
+    assert len(plaid.calls) == 1
+    assert get_txn(aws, "t1") is not None
+
+
 def test_other_webhooks_do_not_sync(aws, plaid):
     response = app.lambda_handler(
         webhook_event({"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": ITEM_ID}), None

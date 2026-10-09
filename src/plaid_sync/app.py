@@ -20,6 +20,14 @@ from shared.plaid import PlaidClient, PlaidError
 logger = logging.getLogger()
 
 MUTATION_DURING_PAGINATION = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
+# Plaid only sends SYNC_UPDATES_AVAILABLE after /transactions/sync has been called once,
+# so the legacy update webhooks must also trigger a sync to bootstrap new Items.
+SYNC_WEBHOOK_CODES = {
+    "SYNC_UPDATES_AVAILABLE",
+    "INITIAL_UPDATE",
+    "HISTORICAL_UPDATE",
+    "DEFAULT_UPDATE",
+}
 MAX_PAGINATION_RESTARTS = 3
 
 _dynamodb = None
@@ -74,7 +82,7 @@ def lambda_handler(event, context):
         },
     )
 
-    if webhook_type == "TRANSACTIONS" and webhook_code == "SYNC_UPDATES_AVAILABLE" and item_id:
+    if webhook_type == "TRANSACTIONS" and webhook_code in SYNC_WEBHOOK_CODES and item_id:
         sync_item(item_id)
     return json_response(200, {"ok": True})
 

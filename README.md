@@ -61,7 +61,8 @@ Access tokens are **not** stored here; they live in the Plaid secret under
 
 ## Plaid sync
 
-A `TRANSACTIONS` / `SYNC_UPDATES_AVAILABLE` webhook (or a direct invoke with
+A `TRANSACTIONS` webhook with code `SYNC_UPDATES_AVAILABLE`, `INITIAL_UPDATE`,
+`HISTORICAL_UPDATE` or `DEFAULT_UPDATE` (or a direct invoke with
 `{"item_id": "..."}`) makes the Lambda page through `/transactions/sync` from the
 stored cursor, so only new, modified and removed transactions are processed.
 The new cursor is saved only after all pages are applied, so a failed run
@@ -148,7 +149,8 @@ sam local invoke TelegramBotFunction -e events/telegram_update.json
    python scripts/plaid_sandbox.py link
    ```
 
-   Plaid sends `SYNC_UPDATES_AVAILABLE` once the initial transactions are ready.
+   Plaid then sends `INITIAL_UPDATE` / `HISTORICAL_UPDATE`, which trigger the
+   first sync. `SYNC_UPDATES_AVAILABLE` only starts arriving after that first sync.
 
 4. Generate more activity and trigger a sync:
 
