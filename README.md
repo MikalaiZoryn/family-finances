@@ -4,7 +4,8 @@ Serverless service that syncs family transactions from Plaid into DynamoDB and
 asks for their categories through a private Telegram bot. See
 [Requirements.txt](Requirements.txt) for the full requirements.
 
-> Status: infrastructure scaffold. Both Lambdas are stubs that return `200 {"ok": true}`.
+> Status: Plaid sync Lambda implemented (sandbox). Telegram Lambda is a stub.
+> Plaid webhook signature verification is not implemented yet.
 
 ## Layout
 
@@ -16,6 +17,7 @@ src/plaid_sync/            Plaid webhook Lambda
 src/telegram_bot/          Telegram webhook Lambda
 src/shared/                Lambda layer with shared code (import as `shared`)
 events/                    Sample API Gateway events for `sam local invoke`
+scripts/plaid_sandbox.py   Link a Plaid sandbox Item, fire webhooks, refresh transactions
 tests/                     Unit tests
 .github/workflows/         CI (PRs / branches) and Deploy (main)
 ```
@@ -27,14 +29,47 @@ tests/                     Unit tests
 | Attribute             | Notes                                                                |
 |-----------------------|----------------------------------------------------------------------|
 | `transaction_date`    | Plaid `date`, ISO `YYYY-MM-DD`                                       |
+| `status`              | `pending` or `posted`                                                |
+| `amount`, `currency`  | Plaid amount (positive = money out), ISO currency code               |
+| `item_id`, `account_id`, `account_name`, `account_mask` | Plaid Item / account               |
+| `name`, `merchant_name`, `authorized_date`, `pending_transaction_id`, `payment_channel` | Plaid fields |
+| `plaid_category_primary`, `plaid_category_detailed` | Plaid `personal_finance_category`      |
+| `created_at`, `updated_at` | ISO UTC timestamps                                              |
 | `expense_category`    | **Absent** until the user categorizes it (never stored as NULL)      |
 | `telegram_message_id` | Set when the transaction was sent to Telegram, prevents re-sending   |
+
+Plaid fields that are null are omitted. The sync only `SET`s Plaid-owned
+attributes, so `expense_category` and `telegram_message_id` survive updates.
+Transactions Plaid reports as removed are deleted.
 
 GSI `CategoryDateIndex` (`expense_category`, `transaction_date`) is sparse and
 contains only categorized transactions. Monthly totals = one query per category
 with `transaction_date BETWEEN 'YYYY-MM-01' AND 'YYYY-MM-31'`.
 
-`PlaidItemsTable` — partition key `item_id`; stores the sync cursor per Plaid Item.
+`PlaidItemsTable` — partition key `item_id`, one row per Plaid Item.
+
+| Attribute          | Notes                                                                  |
+|--------------------|------------------------------------------------------------------------|
+| `cursor`           | Plaid `/transactions/sync` cursor; absent until the first sync         |
+| `last_synced_at`   | ISO UTC timestamp of the last successful sync                          |
+| `last_sync_counts` | added / modified / removed / upserted / skipped counts of the last sync |
+| `sync_start_date`  | Transactions dated before this are never stored                        |
+| `institution_id`, `created_at` | Set when the Item is linked                                |
+
+Access tokens are **not** stored here; they live in the Plaid secret under
+`access_tokens.<item_id>`.
+
+## Plaid sync
+
+A `TRANSACTIONS` / `SYNC_UPDATES_AVAILABLE` webhook (or a direct invoke with
+`{"item_id": "..."}`) makes the Lambda page through `/transactions/sync` from the
+stored cursor, so only new, modified and removed transactions are processed.
+The new cursor is saved only after all pages are applied, so a failed run
+is retried from the previous cursor. All writes are idempotent.
+
+On the first sync of an Item (no row or no cursor), only the last
+`INITIAL_SYNC_DAYS` (default 30) of history is requested, and `sync_start_date`
+is recorded. Older transactions are skipped on every later sync too.
 
 ## Local development
 
@@ -93,3 +128,33 @@ sam local invoke TelegramBotFunction -e events/telegram_update.json
      `setWebhook` with the `TelegramWebhookUrl` stack output.
 
    Secrets, tables and their data are retained if the stack is deleted.
+
+## Plaid sandbox
+
+1. Create a Plaid account and copy the **sandbox** `client_id` and `secret` from
+   the [Plaid dashboard](https://dashboard.plaid.com/developers/keys).
+2. Put them into the `family-finances/plaid` secret, keeping `env` = `sandbox`:
+
+   ```bash
+   aws secretsmanager put-secret-value --secret-id family-finances/plaid \
+     --secret-string '{"client_id":"...","secret":"...","env":"sandbox","access_tokens":{}}'
+   ```
+
+3. Link a sandbox Item (First Platypus Bank, `user_transactions_dynamic`). The
+   script stores the access token in the secret, creates the PlaidItemsTable
+   row and registers the stack's `PlaidWebhookUrl` as the Item's webhook:
+
+   ```bash
+   python scripts/plaid_sandbox.py link
+   ```
+
+   Plaid sends `SYNC_UPDATES_AVAILABLE` once the initial transactions are ready.
+
+4. Generate more activity and trigger a sync:
+
+   ```bash
+   python scripts/plaid_sandbox.py refresh <item_id>       # new / pending→posted transactions
+   python scripts/plaid_sandbox.py fire-webhook <item_id>  # force a sync webhook
+   aws lambda invoke --function-name <PlaidSyncFunction name> \
+     --cli-binary-format raw-in-base64-out --payload '{"item_id":"<item_id>"}' out.json
+   ```

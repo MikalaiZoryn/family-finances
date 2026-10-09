@@ -137,6 +137,9 @@ Resources:
     Properties:
       CodeUri: src/plaid_sync/
       Handler: app.lambda_handler
+      # Just under the 30s HTTP API integration limit; initial syncs can span several pages.
+      Timeout: 29
+      MemorySize: 256
       LoggingConfig:
         LogGroup: !Ref PlaidSyncLogGroup
       Environment:
@@ -144,6 +147,7 @@ Resources:
           TRANSACTIONS_TABLE: !Ref TransactionsTable
           PLAID_ITEMS_TABLE: !Ref PlaidItemsTable
           PLAID_SECRET_ARN: !Ref PlaidSecret
+          INITIAL_SYNC_DAYS: "30"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TransactionsTable
