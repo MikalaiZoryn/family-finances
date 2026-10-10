@@ -1,3 +1,4 @@
+import base64
 import json
 from datetime import date, timedelta
 from decimal import Decimal
@@ -107,6 +108,21 @@ def plaid(monkeypatch):
     fake = FakePlaid([])
     monkeypatch.setattr(app, "_plaid_client", lambda secret: fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def webhook_runtime(monkeypatch):
+    """Accept webhook signatures, run the async sync inline, and capture Telegram alerts."""
+    runtime = {"verified": True, "started": [], "alerts": []}
+    monkeypatch.setattr(app.plaid_webhook, "verify", lambda client, h, b: runtime["verified"])
+
+    def start_sync(item_id):
+        runtime["started"].append(item_id)
+        app.sync_item(item_id)
+
+    monkeypatch.setattr(app, "_start_sync", start_sync)
+    monkeypatch.setattr(app, "_telegram_alert", runtime["alerts"].append)
+    return runtime
 
 
 def webhook_event(body):
@@ -276,11 +292,41 @@ def test_restarts_pagination_on_mutation(aws, plaid):
     assert get_plaid_item(aws)["cursor"] == "c2"
 
 
-def test_plaid_errors_propagate(aws, plaid):
-    plaid.responses = [PlaidError("ITEM_ERROR", "ITEM_LOGIN_REQUIRED", "login")]
+def test_transient_plaid_errors_propagate_for_retry(aws, plaid):
+    plaid.responses = [PlaidError("INSTITUTION_ERROR", "INSTITUTION_DOWN", "down")]
 
     with pytest.raises(PlaidError):
         app.sync_item(ITEM_ID)
+
+
+def test_login_required_during_sync_marks_item_and_alerts_once(aws, plaid, webhook_runtime):
+    aws["items"].put_item(
+        Item={"item_id": ITEM_ID, "cursor": "c1", "institution_name": "Chase"}
+    )
+    error = PlaidError("ITEM_ERROR", "ITEM_LOGIN_REQUIRED", "login")
+    plaid.responses = [error, error]
+
+    first = app.sync_item(ITEM_ID)
+    app.sync_item(ITEM_ID)
+
+    assert first == {"item_id": ITEM_ID, "synced": False, "error_code": "ITEM_LOGIN_REQUIRED"}
+    row = get_plaid_item(aws)
+    assert row["status"] == "needs_update"
+    assert row["status_reason"] == "ITEM_LOGIN_REQUIRED"
+    assert row["cursor"] == "c1"
+    assert len(webhook_runtime["alerts"]) == 1
+    assert "Chase" in webhook_runtime["alerts"][0]
+    assert f"plaid_link.py update {ITEM_ID}" in webhook_runtime["alerts"][0]
+
+
+def test_successful_sync_clears_needs_update(aws, plaid, webhook_runtime):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "cursor": "c1", "status": "needs_update"})
+    plaid.responses = [page(next_cursor="c2")]
+
+    app.sync_item(ITEM_ID)
+
+    assert get_plaid_item(aws)["status"] == "ok"
+    assert webhook_runtime["alerts"] == [app.alert_text({"item_id": ITEM_ID, "status": "ok"})]
 
 
 def test_unknown_item_is_ignored(aws, plaid):
@@ -319,13 +365,100 @@ def test_transaction_update_webhooks_trigger_sync(aws, plaid, webhook_code):
     assert get_txn(aws, "t1") is not None
 
 
+def test_sync_webhook_hands_off_to_async_sync(aws, plaid, webhook_runtime):
+    plaid.responses = [page()]
+
+    app.lambda_handler(json.loads((EVENTS / "plaid_webhook.json").read_text()), None)
+
+    assert webhook_runtime["started"] == [ITEM_ID]
+
+
+def test_unverified_webhook_is_rejected(aws, plaid, webhook_runtime):
+    webhook_runtime["verified"] = False
+
+    response = app.lambda_handler(json.loads((EVENTS / "plaid_webhook.json").read_text()), None)
+
+    assert response["statusCode"] == 401
+    assert webhook_runtime["started"] == []
+
+
+def test_base64_body_is_decoded(aws, plaid, webhook_runtime):
+    event = json.loads((EVENTS / "plaid_webhook.json").read_text())
+    event["body"] = base64.b64encode(event["body"].encode()).decode()
+    event["isBase64Encoded"] = True
+    plaid.responses = [page()]
+
+    assert app.lambda_handler(event, None)["statusCode"] == 200
+    assert webhook_runtime["started"] == [ITEM_ID]
+
+
+def item_webhook(code, **extra):
+    body = {"webhook_type": "ITEM", "webhook_code": code, "item_id": ITEM_ID, **extra}
+    return webhook_event(body)
+
+
 def test_other_webhooks_do_not_sync(aws, plaid):
-    response = app.lambda_handler(
-        webhook_event({"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": ITEM_ID}), None
-    )
+    response = app.lambda_handler(item_webhook("WEBHOOK_UPDATE_ACKNOWLEDGED"), None)
 
     assert response["statusCode"] == 200
     assert plaid.calls == []
+
+
+def test_item_error_webhook_alerts_once_per_change(aws, plaid, webhook_runtime):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "institution_name": "Bank <&>"})
+    event = item_webhook("ERROR", error={"error_code": "ITEM_LOGIN_REQUIRED"})
+
+    assert app.lambda_handler(event, None)["statusCode"] == 200
+    app.lambda_handler(event, None)  # redelivered
+
+    assert get_plaid_item(aws)["status"] == "needs_update"
+    assert len(webhook_runtime["alerts"]) == 1
+    assert "Bank &lt;&amp;&gt;" in webhook_runtime["alerts"][0]
+    assert plaid.calls == []
+
+
+@pytest.mark.parametrize(
+    ("code", "extra", "status"),
+    [
+        ("PENDING_DISCONNECT", {}, "pending_disconnect"),
+        ("PENDING_EXPIRATION", {}, "pending_disconnect"),
+        ("USER_PERMISSION_REVOKED", {}, "revoked"),
+        ("ERROR", {"error": {"error_code": "ITEM_NOT_FOUND"}}, "revoked"),
+        ("NEW_ACCOUNTS_AVAILABLE", {}, "new_accounts"),
+    ],
+)
+def test_item_webhooks_set_status(aws, plaid, webhook_runtime, code, extra, status):
+    aws["items"].put_item(Item={"item_id": ITEM_ID})
+
+    app.lambda_handler(item_webhook(code, **extra), None)
+
+    assert get_plaid_item(aws)["status"] == status
+    assert len(webhook_runtime["alerts"]) == 1
+
+
+def test_login_repaired_restores_ok(aws, plaid, webhook_runtime):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "status": "needs_update"})
+
+    app.lambda_handler(item_webhook("LOGIN_REPAIRED"), None)
+
+    assert get_plaid_item(aws)["status"] == "ok"
+    assert "connected again" in webhook_runtime["alerts"][0]
+
+
+def test_new_accounts_does_not_mask_a_broken_login(aws, plaid, webhook_runtime):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "status": "needs_update"})
+
+    app.lambda_handler(item_webhook("NEW_ACCOUNTS_AVAILABLE"), None)
+
+    assert get_plaid_item(aws)["status"] == "needs_update"
+    assert webhook_runtime["alerts"] == []
+
+
+def test_item_webhook_for_unknown_item_is_ignored(aws, plaid, webhook_runtime):
+    app.lambda_handler(item_webhook("ERROR", error={"error_code": "ITEM_LOGIN_REQUIRED"}), None)
+
+    assert aws["items"].scan()["Items"] == []
+    assert webhook_runtime["alerts"] == []
 
 
 def test_invalid_body_returns_400(aws, plaid):

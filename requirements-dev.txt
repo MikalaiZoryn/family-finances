@@ -2,3 +2,4 @@ pytest>=8
 ruff>=0.6
 boto3
 moto[dynamodb,secretsmanager]>=5
+pyjwt[crypto]>=2.9

@@ -5,6 +5,7 @@ Uses your local AWS credentials and the deployed stack's outputs.
     python scripts/plaid_sandbox.py link
     python scripts/plaid_sandbox.py fire-webhook <item_id>
     python scripts/plaid_sandbox.py refresh <item_id>
+    python scripts/plaid_sandbox.py reset-login <item_id>
 """
 
 import argparse
@@ -87,6 +88,12 @@ def cmd_refresh(args, outputs, sm) -> None:
     print("Requested /transactions/refresh.")
 
 
+def cmd_reset_login(args, outputs, sm) -> None:
+    secret = load_secret(sm, outputs["PlaidSecretArn"])
+    client_for(secret).sandbox_item_reset_login(access_token_for(secret, args.item_id))
+    print("Item forced into ITEM_LOGIN_REQUIRED; Plaid sends an ITEM ERROR webhook.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--stack-name", default="family-finances")
@@ -109,6 +116,10 @@ def main() -> None:
     refresh = sub.add_parser("refresh", help="Generate new sandbox transactions for an Item")
     refresh.add_argument("item_id")
     refresh.set_defaults(func=cmd_refresh)
+
+    reset = sub.add_parser("reset-login", help="Force ITEM_LOGIN_REQUIRED to test reconnecting")
+    reset.add_argument("item_id")
+    reset.set_defaults(func=cmd_reset_login)
 
     args = parser.parse_args()
     outputs = stack_outputs(args.stack_name, args.region)

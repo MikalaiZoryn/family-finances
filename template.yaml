@@ -178,8 +178,9 @@ Resources:
     Properties:
       CodeUri: src/plaid_sync/
       Handler: app.lambda_handler
-      # Just under the 30s HTTP API integration limit; initial syncs can span several pages.
-      Timeout: 29
+      # Webhooks are acknowledged at once; the sync itself runs in an async self-invoke,
+      # and a first sync after a full history backfill can span many slow pages.
+      Timeout: 120
       MemorySize: 256
       LoggingConfig:
         LogGroup: !Ref PlaidSyncLogGroup
@@ -189,6 +190,8 @@ Resources:
           PLAID_ITEMS_TABLE: !Ref PlaidItemsTable
           PLAID_SECRET_ARN: !Ref PlaidSecret
           INITIAL_SYNC_DAYS: "30"
+          TELEGRAM_SECRET_ARN: !Ref TelegramSecret
+          TELEGRAM_CHAT_ID: !Ref TelegramChatId
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TransactionsTable
@@ -196,6 +199,13 @@ Resources:
             TableName: !Ref PlaidItemsTable
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Ref PlaidSecret
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref TelegramSecret
+        # Async self-invoke for the sync (a pattern avoids a circular reference to the function).
+        - Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-PlaidSyncFunction-*
       Events:
         PlaidWebhook:
           Type: HttpApi
@@ -285,6 +295,8 @@ Outputs:
     Value: !Ref CategoryLimitsTable
   CategoryStateTableName:
     Value: !Ref CategoryStateTable
+  PlaidSyncFunctionName:
+    Value: !Ref PlaidSyncFunction
   PlaidSecretArn:
     Value: !Ref PlaidSecret
   TelegramSecretArn:

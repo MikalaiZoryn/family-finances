@@ -79,9 +79,60 @@ class PlaidClient:
     def transactions_refresh(self, access_token: str) -> dict[str, Any]:
         return self._post("/transactions/refresh", {"access_token": access_token})
 
+    # Link
+    def link_token_create(
+        self,
+        client_user_id: str,
+        client_name: str,
+        webhook: str,
+        products: list[str] | None = None,
+        access_token: str | None = None,
+        days_requested: int | None = None,
+        country_codes: tuple[str, ...] = ("US",),
+    ) -> dict[str, Any]:
+        """Create a Hosted Link token; with access_token it opens update mode instead."""
+        body: dict[str, Any] = {
+            "user": {"client_user_id": client_user_id},
+            "client_name": client_name,
+            "country_codes": list(country_codes),
+            "language": "en",
+            "webhook": webhook,
+            "hosted_link": {},
+        }
+        if access_token:
+            # Update mode: no products; let the user add or remove accounts too.
+            body["access_token"] = access_token
+            body["update"] = {"account_selection_enabled": True}
+        else:
+            body["products"] = products or []
+            if days_requested:
+                body["transactions"] = {"days_requested": days_requested}
+        return self._post("/link/token/create", body)
+
+    def link_token_get(self, link_token: str) -> dict[str, Any]:
+        return self._post("/link/token/get", {"link_token": link_token})
+
     # Items
     def item_public_token_exchange(self, public_token: str) -> dict[str, Any]:
         return self._post("/item/public_token/exchange", {"public_token": public_token})
+
+    def item_get(self, access_token: str) -> dict[str, Any]:
+        return self._post("/item/get", {"access_token": access_token})
+
+    def item_remove(self, access_token: str) -> dict[str, Any]:
+        return self._post("/item/remove", {"access_token": access_token})
+
+    def institutions_get_by_id(
+        self, institution_id: str, country_codes: tuple[str, ...] = ("US",)
+    ) -> dict[str, Any]:
+        return self._post(
+            "/institutions/get_by_id",
+            {"institution_id": institution_id, "country_codes": list(country_codes)},
+        )
+
+    # Webhooks
+    def webhook_verification_key_get(self, key_id: str) -> dict[str, Any]:
+        return self._post("/webhook_verification_key/get", {"key_id": key_id})
 
     # Sandbox only
     def sandbox_public_token_create(
@@ -104,6 +155,9 @@ class PlaidClient:
             "/sandbox/public_token/create",
             {"institution_id": institution_id, "initial_products": products, "options": options},
         )
+
+    def sandbox_item_reset_login(self, access_token: str) -> dict[str, Any]:
+        return self._post("/sandbox/item/reset_login", {"access_token": access_token})
 
     def sandbox_item_fire_webhook(
         self, access_token: str, webhook_code: str = "SYNC_UPDATES_AVAILABLE"

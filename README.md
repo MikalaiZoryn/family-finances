@@ -4,11 +4,12 @@ Serverless service that syncs family transactions from Plaid into DynamoDB and
 asks for their categories through a private Telegram bot. See
 [Requirements.txt](Requirements.txt) for the full requirements.
 
-> Status: Plaid sync Lambda implemented (sandbox). Telegram Lambda sends
-> uncategorized expenses and saves the chosen category. Aggregation Lambda
-> totals categorized expenses against monthly budgets and posts a report
-> (no schedules yet; all runs are manual invokes).
-> Plaid webhook signature verification is not implemented yet.
+> Status: Plaid sync Lambda implemented; real banks are linked with Hosted Link
+> from `scripts/plaid_link.py`. Plaid webhooks are signature-verified. Telegram
+> Lambda sends uncategorized expenses and saves the chosen category. Aggregation
+> Lambda totals categorized expenses against monthly budgets and posts a report
+> (no schedules yet; all runs are manual invokes). Plaid integration state and
+> remaining setup tasks: [PLAID_PLAN.md](PLAID_PLAN.md).
 
 ## Layout
 
@@ -21,6 +22,7 @@ src/telegram_bot/          Telegram webhook Lambda
 src/aggregation/           Monthly budget aggregation Lambda
 src/shared/                Lambda layer with shared code (import as `shared`)
 events/                    Sample API Gateway events for `sam local invoke`
+scripts/plaid_link.py      Connect real banks (Hosted Link), reconnect, list, remove Items
 scripts/plaid_sandbox.py   Link a Plaid sandbox Item, fire webhooks, refresh transactions
 tests/                     Unit tests
 .github/workflows/         CI (PRs / branches) and Deploy (main)
@@ -65,7 +67,8 @@ with `transaction_date BETWEEN 'YYYY-MM-01' AND 'YYYY-MM-31'`.
 | `last_synced_at`   | ISO UTC timestamp of the last successful sync                          |
 | `last_sync_counts` | added / modified / removed / upserted / skipped counts of the last sync |
 | `sync_start_date`  | Transactions dated before this are never stored                        |
-| `institution_id`, `created_at` | Set when the Item is linked                                |
+| `institution_id`, `institution_name`, `accounts`, `link_session_id`, `created_at` | Set when the Item is linked |
+| `status`, `status_reason`, `status_updated_at` | `ok`, `needs_update`, `pending_disconnect`, `new_accounts` or `revoked`; absent = ok |
 
 Access tokens are **not** stored here; they live in the Plaid secret under
 `access_tokens.<item_id>`.
@@ -87,6 +90,11 @@ Access tokens are **not** stored here; they live in the Plaid secret under
 
 ## Plaid sync
 
+Every webhook's `Plaid-Verification` JWT is checked (ES256, key fetched by `kid`
+and cached, at most 5 minutes old, SHA-256 of the raw body must match); anything
+else gets a 401. Verified webhooks are acknowledged at once and the sync runs in
+an async invoke of the same function.
+
 A `TRANSACTIONS` webhook with code `SYNC_UPDATES_AVAILABLE`, `INITIAL_UPDATE`,
 `HISTORICAL_UPDATE` or `DEFAULT_UPDATE` (or a direct invoke with
 `{"item_id": "..."}`) makes the Lambda page through `/transactions/sync` from the
@@ -97,6 +105,13 @@ is retried from the previous cursor. All writes are idempotent.
 On the first sync of an Item (no row or no cursor), only the last
 `INITIAL_SYNC_DAYS` (default 30) of history is requested, and `sync_start_date`
 is recorded. Older transactions are skipped on every later sync too.
+
+**Item health** — `ITEM` webhooks (`ERROR`, `PENDING_DISCONNECT`,
+`PENDING_EXPIRATION`, `USER_PERMISSION_REVOKED`, `LOGIN_REPAIRED`,
+`NEW_ACCOUNTS_AVAILABLE`) and sync errors that need the user (e.g.
+`ITEM_LOGIN_REQUIRED`) set the Item's `status` and post one Telegram alert per
+change with the command to run (`plaid_link.py update <item_id>`). Transient
+errors (e.g. `INSTITUTION_DOWN`) fail the async invoke so Lambda retries it.
 
 ## Telegram categorization
 
@@ -226,6 +241,33 @@ sam local invoke AggregationFunction -e events/aggregation_run.json
    user ID. Set it as the `TELEGRAM_CHAT_ID` variable and redeploy.
 
    Secrets, tables and their data are retained if the stack is deleted.
+
+## Connecting real banks (production)
+
+1. Get production access in the Plaid Dashboard, then store the production keys
+   (prompts with hidden input; drops tokens from the other environment):
+
+   ```bash
+   python scripts/plaid_link.py set-credentials            # --env sandbox to go back
+   ```
+
+2. Connect each bank — prints a Plaid Hosted Link URL; finish in the browser,
+   then press Enter. The access token goes to the Plaid secret, the Item to
+   PlaidItemsTable, and the first sync starts:
+
+   ```bash
+   python scripts/plaid_link.py link
+   python scripts/plaid_link.py list
+   ```
+
+3. When Telegram says a bank needs attention:
+
+   ```bash
+   python scripts/plaid_link.py update <item_id>    # reconnect / share new accounts
+   python scripts/plaid_link.py remove <item_id> [--purge-transactions]
+   ```
+
+`link` also works in sandbox (First Platypus Bank, `user_good` / `pass_good`).
 
 ## Plaid sandbox
 

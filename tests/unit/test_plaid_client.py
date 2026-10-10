@@ -66,3 +66,46 @@ def test_error_response_raises_plaid_error(monkeypatch):
 def test_unknown_env_is_rejected():
     with pytest.raises(ValueError):
         PlaidClient("id", "secret", "development")
+
+
+def capture_post(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data)
+        return FakeResponse(b"{}")
+
+    monkeypatch.setattr(plaid.urllib.request, "urlopen", fake_urlopen)
+    return captured
+
+
+def test_link_token_create_new_item(monkeypatch):
+    captured = capture_post(monkeypatch)
+
+    PlaidClient("id", "secret", "production").link_token_create(
+        "family", "Family Finances", "https://hook", products=["transactions"], days_requested=30
+    )
+
+    assert captured["url"] == "https://production.plaid.com/link/token/create"
+    body = captured["body"]
+    assert body["products"] == ["transactions"]
+    assert body["transactions"] == {"days_requested": 30}
+    assert body["hosted_link"] == {}
+    assert body["webhook"] == "https://hook"
+    assert body["country_codes"] == ["US"]
+    assert "access_token" not in body
+
+
+def test_link_token_create_update_mode(monkeypatch):
+    captured = capture_post(monkeypatch)
+
+    PlaidClient("id", "secret").link_token_create(
+        "family", "Family Finances", "https://hook", access_token="access-token"
+    )
+
+    body = captured["body"]
+    assert body["access_token"] == "access-token"
+    assert body["update"] == {"account_selection_enabled": True}
+    assert "products" not in body
+    assert "transactions" not in body

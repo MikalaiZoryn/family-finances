@@ -1,8 +1,11 @@
 """Plaid webhook handler - synchronizes transactions via Plaid Transactions Sync API.
 
-Invoked by API Gateway (Plaid webhook) or directly with {"item_id": "..."}.
+Invoked by API Gateway (Plaid webhook) or directly with {"item_id": "..."}. Webhooks are
+verified, acknowledged at once, and the sync runs in an async invoke of this function.
 """
 
+import base64
+import html
 import json
 import logging
 import os
@@ -13,9 +16,11 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from shared import plaid_webhook
 from shared.aws_secrets import get_secret_json
 from shared.http import json_response
 from shared.plaid import PlaidClient, PlaidError
+from shared.telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger()
 
@@ -29,6 +34,27 @@ SYNC_WEBHOOK_CODES = {
     "DEFAULT_UPDATE",
 }
 MAX_PAGINATION_RESTARTS = 3
+# Sync errors that only the user can fix by reconnecting (Link update mode); retrying won't help.
+NEEDS_UPDATE_CODES = {
+    "ITEM_LOGIN_REQUIRED",
+    "INVALID_CREDENTIALS",
+    "INVALID_MFA",
+    "ITEM_LOCKED",
+    "ACCESS_NOT_GRANTED",
+    "INSUFFICIENT_CREDENTIALS",
+    "USER_SETUP_REQUIRED",
+    "PASSWORD_RESET_REQUIRED",
+}
+# The Item is gone for good: it must be removed and linked again.
+REVOKED_CODES = {"ITEM_NOT_FOUND", "USER_PERMISSION_REVOKED", "USER_ACCOUNT_REVOKED"}
+
+# PlaidItemsTable `status` values. Absent means ok.
+STATUS_OK = "ok"
+STATUS_NEEDS_UPDATE = "needs_update"
+STATUS_PENDING_DISCONNECT = "pending_disconnect"
+STATUS_NEW_ACCOUNTS = "new_accounts"
+STATUS_REVOKED = "revoked"
+LINK_SCRIPT = "python scripts/plaid_link.py"
 # User/bot fields copied from a pending transaction to its posted replacement.
 CARRY_OVER_ATTRIBUTES = (
     "expense_category",
@@ -66,14 +92,45 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _start_sync(item_id: str) -> None:
+    """Run the sync in an async invoke of this function so the webhook is acknowledged at once."""
+    boto3.client("lambda").invoke(
+        FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
+        InvocationType="Event",
+        Payload=json.dumps({"item_id": item_id}).encode(),
+    )
+
+
+def _telegram_alert(text: str) -> None:
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not chat_id:
+        logger.warning("TELEGRAM_CHAT_ID not set; Plaid item alert not sent")
+        return
+    try:
+        bot_token = get_secret_json(os.environ["TELEGRAM_SECRET_ARN"])["bot_token"]
+        TelegramClient(bot_token).send_message(chat_id, text)
+    except (TelegramError, KeyError) as e:
+        logger.error("Plaid item alert not sent", extra={"error": str(e)})
+
+
+def _raw_body(event) -> bytes:
+    body = event.get("body") or ""
+    return base64.b64decode(body) if event.get("isBase64Encoded") else body.encode()
+
+
 def lambda_handler(event, context):
     if "requestContext" not in event:
         return sync_item(event["item_id"])
 
     # Never log the request body: it may contain financial data.
     request_id = event["requestContext"].get("requestId")
+    raw_body = _raw_body(event)
+    secret = get_secret_json(os.environ["PLAID_SECRET_ARN"])
+    if not plaid_webhook.verify(_plaid_client(secret), event.get("headers") or {}, raw_body):
+        logger.warning("Plaid webhook verification failed", extra={"request_id": request_id})
+        return json_response(401, {"ok": False})
     try:
-        body = json.loads(event.get("body") or "")
+        body = json.loads(raw_body)
     except ValueError:
         logger.warning("Invalid Plaid webhook body", extra={"request_id": request_id})
         return json_response(400, {"ok": False})
@@ -92,8 +149,76 @@ def lambda_handler(event, context):
     )
 
     if webhook_type == "TRANSACTIONS" and webhook_code in SYNC_WEBHOOK_CODES and item_id:
-        sync_item(item_id)
+        _start_sync(item_id)
+    elif webhook_type == "ITEM" and item_id:
+        handle_item_webhook(webhook_code, item_id, body.get("error") or {})
     return json_response(200, {"ok": True})
+
+
+def handle_item_webhook(webhook_code: str, item_id: str, error: dict[str, Any]) -> None:
+    """Track Item health and tell the family in Telegram when a bank needs attention."""
+    if webhook_code == "ERROR":
+        code = error.get("error_code")
+        status = STATUS_REVOKED if code in REVOKED_CODES else STATUS_NEEDS_UPDATE
+        set_item_status(item_id, status, code)
+    elif webhook_code in ("PENDING_DISCONNECT", "PENDING_EXPIRATION"):
+        set_item_status(item_id, STATUS_PENDING_DISCONNECT, webhook_code)
+    elif webhook_code == "USER_PERMISSION_REVOKED":
+        set_item_status(item_id, STATUS_REVOKED, webhook_code)
+    elif webhook_code == "LOGIN_REPAIRED":
+        set_item_status(item_id, STATUS_OK, webhook_code)
+    elif webhook_code == "NEW_ACCOUNTS_AVAILABLE":
+        set_item_status(item_id, STATUS_NEW_ACCOUNTS, webhook_code, only_if_ok=True)
+
+
+def set_item_status(item_id: str, status: str, reason: str | None, only_if_ok=False) -> bool:
+    """Set the Item's status and send one Telegram alert per change. Returns True if changed."""
+    condition = "attribute_exists(item_id) AND (attribute_not_exists(#status) OR #status <> :s)"
+    values = {":s": status, ":r": reason or "", ":now": _now()}
+    if only_if_ok:
+        condition += " AND (attribute_not_exists(#status) OR #status = :ok)"
+        values[":ok"] = STATUS_OK
+    try:
+        row = _table("PLAID_ITEMS_TABLE").update_item(
+            Key={"item_id": item_id},
+            UpdateExpression="SET #status = :s, status_reason = :r, status_updated_at = :now",
+            ConditionExpression=condition,
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues=values,
+            ReturnValues="ALL_NEW",
+        )["Attributes"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        return False  # Unknown Item, or the status is unchanged (webhooks are redelivered).
+
+    logger.info("Plaid item status changed", extra={"item_id": item_id, "status": status})
+    _telegram_alert(alert_text(row))
+    return True
+
+
+def alert_text(row: dict[str, Any]) -> str:
+    item_id = row["item_id"]
+    bank = html.escape(row.get("institution_name") or item_id)
+    reason = html.escape(row.get("status_reason") or "")
+    update = f"<code>{LINK_SCRIPT} update {item_id}</code>"
+    match row["status"]:
+        case "needs_update":
+            return (
+                f"⚠️ <b>{bank}</b> needs to be reconnected ({reason}). "
+                f"Transactions are not syncing until you run:\n{update}"
+            )
+        case "pending_disconnect":
+            return f"⏳ Access to <b>{bank}</b> expires within 7 days. Renew it with:\n{update}"
+        case "new_accounts":
+            return f"🆕 <b>{bank}</b> has new accounts. To share them, run:\n{update}"
+        case "revoked":
+            return (
+                f"⛔ Access to <b>{bank}</b> was revoked ({reason}). To connect it again, run:\n"
+                f"<code>{LINK_SCRIPT} remove {item_id}</code>\n<code>{LINK_SCRIPT} link</code>"
+            )
+        case _:
+            return f"✅ <b>{bank}</b> is connected again."
 
 
 def sync_item(item_id: str) -> dict[str, Any]:
@@ -105,6 +230,7 @@ def sync_item(item_id: str) -> dict[str, Any]:
     items_table = _table("PLAID_ITEMS_TABLE")
     item = items_table.get_item(Key={"item_id": item_id}).get("Item") or {}
     start_cursor = item.get("cursor") or None
+    previous_status = item.get("status")
     sync_start_date = item.get("sync_start_date")
 
     # Initial sync: only fetch and keep the last INITIAL_SYNC_DAYS of history.
@@ -122,7 +248,20 @@ def sync_item(item_id: str) -> dict[str, Any]:
             )
 
     client = _plaid_client(secret)
-    page = _fetch_all_pages(client, access_token, start_cursor, days_requested)
+    try:
+        page = _fetch_all_pages(client, access_token, start_cursor, days_requested)
+    except PlaidError as e:
+        logger.warning(
+            "Plaid sync failed",
+            extra={"item_id": item_id, "error_code": e.error_code, "request_id": e.request_id},
+        )
+        if e.error_code in NEEDS_UPDATE_CODES:
+            set_item_status(item_id, STATUS_NEEDS_UPDATE, e.error_code)
+        elif e.error_code in REVOKED_CODES:
+            set_item_status(item_id, STATUS_REVOKED, e.error_code)
+        else:
+            raise  # Transient (e.g. INSTITUTION_DOWN): the async invoke retries with backoff.
+        return {"item_id": item_id, "synced": False, "error_code": e.error_code}
 
     transactions_table = _table("TRANSACTIONS_TABLE")
     upserted = skipped = 0
@@ -149,6 +288,9 @@ def sync_item(item_id: str) -> dict[str, Any]:
         "skipped_before_start_date": skipped,
     }
     _save_cursor(items_table, item_id, start_cursor, page["next_cursor"], counts)
+    if previous_status == STATUS_NEEDS_UPDATE:
+        # The login works again (e.g. reconnected without a LOGIN_REPAIRED webhook yet).
+        set_item_status(item_id, STATUS_OK, "SYNC_SUCCEEDED")
     logger.info("Plaid item synced", extra={"item_id": item_id, **counts})
     return {"item_id": item_id, "synced": True, **counts}
 
