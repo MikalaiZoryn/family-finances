@@ -1,7 +1,8 @@
 """Telegram categorization bot.
 
-Invoked by API Gateway (Telegram webhook: category button presses) or directly /
-on a schedule (any non-HTTP event) to send uncategorized expenses to the chat.
+Invoked by API Gateway (Telegram webhook: category button presses) or directly
+(any non-HTTP event) to send uncategorized expenses to the chat. New expenses are
+normally sent by the Plaid sync right away; the direct invoke is a fallback sweep.
 """
 
 import hmac
@@ -10,7 +11,6 @@ import json
 import logging
 import os
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 import boto3
@@ -19,18 +19,16 @@ from botocore.exceptions import ClientError
 
 from shared.aws_secrets import get_secret_json
 from shared.categories import CATEGORIES
+from shared.expense_messages import (
+    CALLBACK_PREFIX,
+    format_message,
+    is_categorizable,
+    send_expense,
+)
 from shared.http import json_response
 from shared.telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger()
-
-BUTTONS_PER_ROW = 2
-CALLBACK_PREFIX = "cat"
-MAX_CALLBACK_DATA_BYTES = 64
-
-# Not expenses the user needs to categorize.
-EXCLUDED_PRIMARY_CATEGORIES = {"TRANSFER_IN", "TRANSFER_OUT", "INCOME"}
-EXCLUDED_DETAILED_CATEGORIES = {"LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"}
 
 SECRET_TOKEN_HEADER = "x-telegram-bot-api-secret-token"
 
@@ -72,54 +70,6 @@ def lambda_handler(event, context):
 # ----------------------------------------------------------------------
 
 
-def is_categorizable(item: dict[str, Any]) -> bool:
-    """True for expenses the user should categorize (not transfers, income, card payments)."""
-    if Decimal(str(item.get("amount", 0))) <= 0:
-        return False
-    if item.get("plaid_category_primary") in EXCLUDED_PRIMARY_CATEGORIES:
-        return False
-    return item.get("plaid_category_detailed") not in EXCLUDED_DETAILED_CATEGORIES
-
-
-def callback_data(transaction_id: str, category_key: str) -> str:
-    return f"{CALLBACK_PREFIX}:{transaction_id}:{category_key}"
-
-
-def category_keyboard(transaction_id: str) -> dict[str, Any]:
-    buttons = [
-        {"text": label, "callback_data": callback_data(transaction_id, key)}
-        for key, label in CATEGORIES.items()
-    ]
-    return {
-        "inline_keyboard": [
-            buttons[i : i + BUTTONS_PER_ROW] for i in range(0, len(buttons), BUTTONS_PER_ROW)
-        ]
-    }
-
-
-def format_message(item: dict[str, Any]) -> str:
-    title = item.get("merchant_name") or item.get("name") or "Unknown transaction"
-    amount = Decimal(str(item["amount"]))
-    amount_line = f"{amount:,.2f}"
-    if item.get("currency"):
-        amount_line += f" {item['currency']}"
-    lines = [
-        f"<b>{html.escape(title)}</b>",
-        html.escape(f"{amount_line} · {item['transaction_date']}"),
-    ]
-    if item.get("status") == "pending":
-        lines.append("⏳ Pending")
-    account = item.get("account_name")
-    if account:
-        if item.get("account_mask"):
-            account += f" ••{item['account_mask']}"
-        lines.append(html.escape(account))
-    plaid_category = item.get("plaid_category_detailed") or item.get("plaid_category_primary")
-    if plaid_category:
-        lines.append(f"Plaid: {html.escape(plaid_category)}")
-    return "\n".join(lines)
-
-
 def _scan_candidates(table) -> list[dict[str, Any]]:
     kwargs: dict[str, Any] = {
         "FilterExpression": Attr("expense_category").not_exists()
@@ -150,31 +100,8 @@ def send_uncategorized() -> dict[str, Any]:
     client = _telegram_client() if to_send else None
     sent = 0
     for item in to_send[:max_messages]:
-        transaction_id = item["transaction_id"]
-        if any(
-            len(callback_data(transaction_id, key).encode()) > MAX_CALLBACK_DATA_BYTES
-            for key in CATEGORIES
-        ):
-            logger.warning(
-                "Transaction ID too long for callback data",
-                extra={"transaction_id": transaction_id},
-            )
-            continue
-        message = client.send_message(
-            chat_id, format_message(item), reply_markup=category_keyboard(transaction_id)
-        )
-        table.update_item(
-            Key={"transaction_id": transaction_id},
-            UpdateExpression=(
-                "SET telegram_message_id = :m, telegram_chat_id = :c, telegram_sent_at = :now"
-            ),
-            ExpressionAttributeValues={
-                ":m": message["message_id"],
-                ":c": message["chat"]["id"],
-                ":now": _now(),
-            },
-        )
-        sent += 1
+        if send_expense(client, table, chat_id, item):
+            sent += 1
 
     counts = {
         "candidates": len(candidates),

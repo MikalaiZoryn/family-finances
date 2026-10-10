@@ -5,8 +5,9 @@ asks for their categories through a private Telegram bot. See
 [Requirements.txt](Requirements.txt) for the full requirements.
 
 > Status: Plaid sync Lambda implemented; real banks are linked with Hosted Link
-> from `scripts/plaid_link.py`. Plaid webhooks are signature-verified. Telegram
-> Lambda sends uncategorized expenses and saves the chosen category. Aggregation
+> from `scripts/plaid_link.py`. Plaid webhooks are signature-verified, and each
+> sync sends its new expenses to Telegram right away. Telegram Lambda sweeps up
+> any expenses still unsent and saves the chosen category. Aggregation
 > Lambda totals categorized expenses against monthly budgets and posts a report
 > (no schedules yet; all runs are manual invokes). Plaid integration state and
 > remaining setup tasks: [PLAID_PLAN.md](PLAID_PLAN.md).
@@ -102,6 +103,15 @@ stored cursor, so only new, modified and removed transactions are processed.
 The new cursor is saved only after all pages are applied, so a failed run
 is retried from the previous cursor. All writes are idempotent.
 
+**New expenses to Telegram** — once the cursor is saved, the sync sends the
+transactions it just *added* to `TELEGRAM_CHAT_ID`, using the same filter and
+message as the Telegram bot (see *Sending* below). Oldest first, at most
+`MAX_MESSAGES_PER_SYNC` (20) per sync. It skips modified transactions and
+posted transactions whose pending version was already sent or categorized.
+Only the run that advanced the cursor sends, so duplicate webhooks for one
+Item can't send twice. Telegram errors are logged and don't fail the sync.
+Anything not sent waits for the Telegram bot's sweep.
+
 On the first sync of an Item (no row or no cursor), only the last
 `INITIAL_SYNC_DAYS` (default 30) of history is requested, and `sync_start_date`
 is recorded. Older transactions are skipped on every later sync too.
@@ -122,7 +132,8 @@ Categories are defined in `src/telegram_bot/app.py` (`CATEGORIES`): `essential`
 (Miscellaneous). The key is stored in `expense_category`; the label is shown on
 the buttons, two per row (`BUTTONS_PER_ROW`).
 
-**Sending** — any non-HTTP invoke (manual now, a schedule later) scans for
+**Sending** — new expenses are normally sent by the Plaid sync (above). Any
+non-HTTP invoke of the Telegram Lambda is a fallback sweep: it scans for
 transactions without `expense_category` and `telegram_message_id`, keeps only
 expenses (`amount > 0`, pending or posted) and skips transfers
 (`TRANSFER_IN` / `TRANSFER_OUT`), income/payroll (`INCOME`) and credit card

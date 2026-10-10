@@ -32,12 +32,12 @@ Previously only a sandbox script linked Items. (workflow_id: wf_616e875531fdfc0a
 | Task | Why it matters | Where | State |
 |------|----------------|-------|-------|
 | Production access for Transactions (US) | Link token creation fails with INVALID_PRODUCT without it | https://dashboard.plaid.com/settings/team/products | verified (dashboard: production authorized, `transactions` in US production) |
-| Put production `client_id` / `secret` into the `family-finances/plaid` secret with `env=production` — run `python scripts/plaid_link.py set-credentials` (prompts, never echoes) | Production calls fail; sandbox tokens are invalid in production | https://dashboard.plaid.com/developers/keys | needs_human |
-| Finish the Data Transparency Messaging use case for the `default` Link customization | Link token creation fails with INVALID_LINK_CUSTOMIZATION (PITFALL-002) | https://dashboard.plaid.com/link/data-transparency-v5 | cannot_verify |
+| Put production `client_id` / `secret` into the `family-finances/plaid` secret with `env=production` — run `python scripts/plaid_link.py set-credentials` (prompts, never echoes) | Production calls fail; sandbox tokens are invalid in production | https://dashboard.plaid.com/developers/keys | verified (2026-10-10: secret env=production; production link succeeded) |
+| Finish the Data Transparency Messaging use case for the `default` Link customization | Link token creation fails with INVALID_LINK_CUSTOMIZATION (PITFALL-002) | https://dashboard.plaid.com/link/data-transparency-v5 | verified by effect (2026-10-10: production /link/token/create and Bank of America link succeeded) |
 | Complete the company profile and the security questionnaire (Chase, PNC and other OAuth banks are hidden from Link without them) | Those banks silently missing from Link (OAUTH-008, TASK-006) | https://dashboard.plaid.com/settings/company/profile , https://dashboard.plaid.com/settings/company/compliance | cannot_verify |
 | Dashboard webhook receivers | Not needed: the per-Item webhook is set on every link token (WEBHOOK-002) | https://dashboard.plaid.com/developers/webhooks | not_applicable |
 | OAuth redirect URI allowlist | Not needed: Hosted Link hosts the OAuth redirect itself and no `completion_redirect_uri` is used | https://dashboard.plaid.com/developers/api | not_applicable |
-| Deploy the stack (push to `main`) | Webhook verification, async sync and alerts only run once deployed | GitHub Actions *Deploy* | needs_human |
+| Deploy the stack (push to `main`) | Webhook verification, async sync and alerts only run once deployed | GitHub Actions *Deploy* | verified (stack UPDATE_COMPLETE 2026-10-10 07:30 UTC) |
 
 ## Implementation checklist
 
@@ -66,7 +66,20 @@ Previously only a sandbox script linked Items. (workflow_id: wf_616e875531fdfc0a
 
 ## Acceptance
 
-- Round 0: pending.
+- Round 1 (2026-10-10): FAIL only on CHECK-009 — company profile / security
+  questionnaire still cannot_verify. All other checks passed with live evidence:
+  forged webhooks 401; signed sandbox + production webhooks accepted; sandbox
+  sync 316 txns with 3 concurrent syncs and no duplicates; reset_login → ITEM
+  ERROR → needs_update + Telegram alert; production Hosted Link → Bank of America
+  (checking + Visa), 22 transactions synced. Update-mode Link UI not yet
+  exercised live (first real use will be when a login breaks).
+- Round 2 (2026-10-10, sync → Telegram push): FAIL on CHECK-008 and CHECK-013.
+  The change was verified by unit tests only (119 passed), with no sandbox run
+  (the developer declined sandbox) and no deploy yet. Everything else passed or
+  doesn't apply: notifications are sent only after the cursor compare-and-set,
+  skip already-sent/categorized and pending→posted rows, and never fail the
+  sync (CHECK-005/010). To close: deploy, then check the next production
+  `Plaid item synced` log for `telegram_sent` and the matching chat messages.
 
 ## Maintenance
 
@@ -86,8 +99,9 @@ the code as it was verified — later changes invalidate it.
    `user_good` / `pass_good` (or `user_transactions_dynamic` / any password).
    In production, pick your real bank.
 4. Return to the terminal and press Enter. Expected: `Linked item <id> at
-   <bank>: N accounts` and `First sync requested.` Transactions show up in
-   Telegram on the next send run.
+   <bank>: N accounts` and `First sync requested.` The first sync sends up to
+   20 expenses to Telegram right away; anything beyond that waits for the
+   Telegram bot's sweep.
 5. `python scripts/plaid_link.py list` shows the Item with `status ok`.
 
 ### Reconnect a broken login
@@ -110,6 +124,12 @@ the code as it was verified — later changes invalidate it.
 - Add webhook signature verification and ITEM-error Telegram alerts
   (developer, 2026-10-10).
 - `client_user_id` is the fixed string `family` — a single-household app.
+- Each sync sends the expenses it just added to Telegram, up to
+  `MAX_MESSAGES_PER_SYNC` = 20, and only after it wins the cursor
+  compare-and-set. The Telegram bot's direct invoke stays as a fallback sweep
+  (developer, 2026-10-10).
+- No sandbox Items for verification: sandbox transactions must not reach the
+  family chat (developer, 2026-10-10).
 
 ## Open questions
 

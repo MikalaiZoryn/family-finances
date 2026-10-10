@@ -11,11 +11,13 @@ from moto import mock_aws
 from plaid_sync import app
 from shared import aws_secrets
 from shared.plaid import PlaidError
+from shared.telegram import TelegramError
 
 EVENTS = Path(__file__).parents[2] / "events"
 ITEM_ID = "sandbox-item-id"
 RECENT = (date.today() - timedelta(days=2)).isoformat()
 OLD = (date.today() - timedelta(days=60)).isoformat()
+OLDER_IN_RANGE = (date.today() - timedelta(days=5)).isoformat()
 
 
 def txn(transaction_id, txn_date=RECENT, pending=False, amount=12.34, **extra):
@@ -474,3 +476,172 @@ def test_direct_invoke_syncs_item(aws, plaid):
 
     assert result["synced"] is True
     assert result["upserted"] == 1
+
+
+# ----------------------------------------------------------------------
+# Telegram notifications for new expenses
+# ----------------------------------------------------------------------
+
+
+class FakeTelegram:
+    def __init__(self, fail_after=None):
+        self.sent = []
+        self.fail_after = fail_after
+
+    def send_message(self, chat_id, text, reply_markup=None):
+        if self.fail_after is not None and len(self.sent) >= self.fail_after:
+            raise TelegramError("Too Many Requests", 429)
+        self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        return {"message_id": 100 + len(self.sent), "chat": {"id": int(chat_id)}}
+
+
+@pytest.fixture
+def telegram(monkeypatch):
+    fake = FakeTelegram()
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "555")
+    monkeypatch.setattr(app, "_telegram_client", lambda: fake)
+    return fake
+
+
+def sent_titles(telegram):
+    return [m["text"].split("\n")[0] for m in telegram.sent]
+
+
+def test_sync_sends_added_expenses_to_telegram(aws, plaid, telegram):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "cursor": "c1"})
+    plaid.responses = [
+        page(
+            added=[
+                txn("t2", merchant_name="Second", txn_date=RECENT),
+                txn("t1", merchant_name="First", txn_date=OLDER_IN_RANGE),
+            ],
+            next_cursor="c2",
+        )
+    ]
+
+    result = app.lambda_handler({"item_id": ITEM_ID}, None)
+
+    assert result["telegram_sent"] == 2
+    assert sent_titles(telegram) == ["<b>First</b>", "<b>Second</b>"]
+    assert telegram.sent[0]["reply_markup"]["inline_keyboard"]
+    assert get_txn(aws, "t1")["telegram_message_id"] == 101
+    assert get_txn(aws, "t1")["telegram_chat_id"] == 555
+    assert get_plaid_item(aws)["last_sync_counts"]["upserted"] == 2
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"amount": -50},
+        {"personal_finance_category": {"primary": "TRANSFER_OUT", "detailed": "X"}},
+        {"personal_finance_category": {"primary": "INCOME", "detailed": "INCOME_WAGES"}},
+        {
+            "personal_finance_category": {
+                "primary": "LOAN_PAYMENTS",
+                "detailed": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+            }
+        },
+    ],
+)
+def test_non_expenses_are_not_sent(aws, plaid, telegram, extra):
+    plaid.responses = [page(added=[txn("t1", **extra)])]
+
+    result = app.sync_item(ITEM_ID)
+
+    assert telegram.sent == []
+    assert result["telegram_sent"] == 0
+
+
+def test_modified_transactions_are_not_sent(aws, plaid, telegram):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "cursor": "c1"})
+    plaid.responses = [page(modified=[txn("t1")], next_cursor="c2")]
+
+    app.sync_item(ITEM_ID)
+
+    assert telegram.sent == []
+
+
+def test_posted_transaction_of_sent_pending_is_not_resent(aws, plaid, telegram):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "cursor": "c1"})
+    plaid.responses = [page(added=[txn("pending-1", pending=True)], next_cursor="c2")]
+    app.sync_item(ITEM_ID)
+    assert len(telegram.sent) == 1
+
+    plaid.responses = [
+        page(
+            added=[txn("posted-1", pending_transaction_id="pending-1")],
+            removed=["pending-1"],
+            next_cursor="c3",
+        )
+    ]
+    result = app.sync_item(ITEM_ID)
+
+    assert len(telegram.sent) == 1
+    assert result["telegram_sent"] == 0
+    assert get_txn(aws, "posted-1")["telegram_message_id"] == 101
+
+
+def test_added_then_removed_in_same_sync_is_not_sent(aws, plaid, telegram):
+    plaid.responses = [page(added=[txn("t1")], removed=["t1"])]
+
+    app.sync_item(ITEM_ID)
+
+    assert telegram.sent == []
+    assert get_txn(aws, "t1") is None
+
+
+def test_run_that_loses_cursor_lock_sends_nothing(aws, plaid, telegram):
+    aws["items"].put_item(Item={"item_id": ITEM_ID, "cursor": "c1"})
+    plaid.responses = [page(added=[txn("t1")], next_cursor="c2")]
+    original = plaid.transactions_sync
+
+    def concurrent_sync_wins(*args, **kwargs):
+        response = original(*args, **kwargs)
+        # A duplicate webhook's sync saves the same page's cursor first.
+        aws["items"].update_item(
+            Key={"item_id": ITEM_ID},
+            UpdateExpression="SET #c = :c",
+            ExpressionAttributeNames={"#c": "cursor"},
+            ExpressionAttributeValues={":c": "c2"},
+        )
+        return response
+
+    plaid.transactions_sync = concurrent_sync_wins
+
+    result = app.sync_item(ITEM_ID)
+
+    assert telegram.sent == []
+    assert "telegram_sent" not in result
+
+
+def test_max_messages_per_sync(aws, plaid, telegram, monkeypatch):
+    monkeypatch.setenv("MAX_MESSAGES_PER_SYNC", "2")
+    plaid.responses = [page(added=[txn(f"t{i}", merchant_name=f"M{i}") for i in range(4)])]
+
+    result = app.sync_item(ITEM_ID)
+
+    assert result["telegram_sent"] == 2
+    assert sent_titles(telegram) == ["<b>M0</b>", "<b>M1</b>"]
+    assert "telegram_message_id" not in get_txn(aws, "t3")
+
+
+def test_telegram_error_does_not_fail_sync(aws, plaid, telegram):
+    telegram.fail_after = 1
+    plaid.responses = [page(added=[txn("t1"), txn("t2")])]
+
+    result = app.sync_item(ITEM_ID)
+
+    assert result["synced"] is True
+    assert result["telegram_sent"] == 1
+    assert get_plaid_item(aws)["cursor"] == "cursor-1"
+    assert "telegram_message_id" not in get_txn(aws, "t2")
+
+
+def test_no_chat_id_skips_sending(aws, plaid, telegram, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_CHAT_ID")
+    plaid.responses = [page(added=[txn("t1")])]
+
+    result = app.sync_item(ITEM_ID)
+
+    assert telegram.sent == []
+    assert result["telegram_sent"] == 0

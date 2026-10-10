@@ -192,6 +192,8 @@ Resources:
           INITIAL_SYNC_DAYS: "30"
           TELEGRAM_SECRET_ARN: !Ref TelegramSecret
           TELEGRAM_CHAT_ID: !Ref TelegramChatId
+          # New expenses sent per sync; the rest wait for the Telegram bot's sweep.
+          MAX_MESSAGES_PER_SYNC: "20"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TransactionsTable

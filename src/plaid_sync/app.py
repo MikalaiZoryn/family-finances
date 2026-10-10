@@ -18,6 +18,7 @@ from botocore.exceptions import ClientError
 
 from shared import plaid_webhook
 from shared.aws_secrets import get_secret_json
+from shared.expense_messages import is_categorizable, send_expense
 from shared.http import json_response
 from shared.plaid import PlaidClient, PlaidError
 from shared.telegram import TelegramClient, TelegramError
@@ -101,14 +102,17 @@ def _start_sync(item_id: str) -> None:
     )
 
 
+def _telegram_client() -> TelegramClient:
+    return TelegramClient(get_secret_json(os.environ["TELEGRAM_SECRET_ARN"])["bot_token"])
+
+
 def _telegram_alert(text: str) -> None:
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not chat_id:
         logger.warning("TELEGRAM_CHAT_ID not set; Plaid item alert not sent")
         return
     try:
-        bot_token = get_secret_json(os.environ["TELEGRAM_SECRET_ARN"])["bot_token"]
-        TelegramClient(bot_token).send_message(chat_id, text)
+        _telegram_client().send_message(chat_id, text)
     except (TelegramError, KeyError) as e:
         logger.error("Plaid item alert not sent", extra={"error": str(e)})
 
@@ -265,13 +269,19 @@ def sync_item(item_id: str) -> dict[str, Any]:
 
     transactions_table = _table("TRANSACTIONS_TABLE")
     upserted = skipped = 0
+    # Added and removed again within this sync (the rows are deleted below): nothing to send.
+    removed_ids = {removed["transaction_id"] for removed in page["removed"]}
+    added_ids = {txn["transaction_id"] for txn in page["added"]} - removed_ids
+    added_rows = []
     for txn in page["added"] + page["modified"]:
         if sync_start_date and txn["date"] < sync_start_date:
             skipped += 1
             continue
         item = to_item(txn, item_id, page["accounts"])
         carry_over = _pending_carry_over(transactions_table, item.get("pending_transaction_id"))
-        _upsert_transaction(transactions_table, item, carry_over)
+        row = _upsert_transaction(transactions_table, item, carry_over)
+        if txn["transaction_id"] in added_ids:
+            added_rows.append(row)
         upserted += 1
 
     # Deleted after the upserts so posted transactions can inherit from their pending rows.
@@ -287,12 +297,54 @@ def sync_item(item_id: str) -> dict[str, Any]:
         "upserted": upserted,
         "skipped_before_start_date": skipped,
     }
-    _save_cursor(items_table, item_id, start_cursor, page["next_cursor"], counts)
+    if _save_cursor(items_table, item_id, start_cursor, page["next_cursor"], counts):
+        # Only the run that advanced the cursor notifies, so a duplicate webhook that
+        # synced the same page concurrently does not send the same expenses twice.
+        counts["telegram_sent"] = notify_new_expenses(transactions_table, added_rows)
     if previous_status == STATUS_NEEDS_UPDATE:
         # The login works again (e.g. reconnected without a LOGIN_REPAIRED webhook yet).
         set_item_status(item_id, STATUS_OK, "SYNC_SUCCEEDED")
     logger.info("Plaid item synced", extra={"item_id": item_id, **counts})
     return {"item_id": item_id, "synced": True, **counts}
+
+
+def notify_new_expenses(table, rows: list[dict[str, Any]]) -> int:
+    """Send just-added expenses to Telegram for categorization; return how many were sent.
+
+    Never raises: the cursor is already saved, so whatever is not sent here is left for
+    the Telegram bot's sweep of unsent expenses.
+    """
+    to_send = sorted(
+        (
+            row
+            for row in rows
+            if is_categorizable(row)
+            and "telegram_message_id" not in row
+            and "expense_category" not in row
+        ),
+        key=lambda row: (row["transaction_date"], row["transaction_id"]),
+    )
+    if not to_send:
+        return 0
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not chat_id:
+        logger.warning("TELEGRAM_CHAT_ID not set; new expenses not sent")
+        return 0
+    max_messages = int(os.environ.get("MAX_MESSAGES_PER_SYNC", "20"))
+    if len(to_send) > max_messages:
+        logger.info(
+            "More new expenses than MAX_MESSAGES_PER_SYNC; the rest wait for the sweep",
+            extra={"new_expenses": len(to_send), "max_messages": max_messages},
+        )
+    sent = 0
+    try:
+        client = _telegram_client()
+        for row in to_send[:max_messages]:
+            if send_expense(client, table, chat_id, row):
+                sent += 1
+    except (TelegramError, KeyError) as e:
+        logger.error("New expenses not sent to Telegram", extra={"error": str(e), "sent": sent})
+    return sent
 
 
 def _fetch_all_pages(
@@ -365,10 +417,11 @@ def _pending_carry_over(table, pending_transaction_id: str | None) -> dict[str, 
 
 def _upsert_transaction(
     table, item: dict[str, Any], carry_over: dict[str, Any] | None = None
-) -> None:
+) -> dict[str, Any]:
     """Update only Plaid-owned fields, preserving user/bot fields like expense_category.
 
     carry_over attributes are set only if the item does not already have them.
+    Returns the stored row.
     """
     names = {"#updated_at": "updated_at", "#created_at": "created_at"}
     values: dict[str, Any] = {":now": _now()}
@@ -383,18 +436,19 @@ def _upsert_transaction(
         names[f"#c{i}"] = attr
         values[f":c{i}"] = value
         sets.append(f"#c{i} = if_not_exists(#c{i}, :c{i})")
-    table.update_item(
+    return table.update_item(
         Key={"transaction_id": item["transaction_id"]},
         UpdateExpression="SET " + ", ".join(sets),
         ExpressionAttributeNames=names,
         ExpressionAttributeValues=values,
-    )
+        ReturnValues="ALL_NEW",
+    )["Attributes"]
 
 
 def _save_cursor(
     table, item_id: str, start_cursor: str | None, next_cursor: str, counts: dict[str, int]
-) -> None:
-    # Optimistic lock: only advance the cursor if no concurrent sync moved it first.
+) -> bool:
+    """Advance the cursor; False if a concurrent sync moved it first (optimistic lock)."""
     values = {":new": next_cursor, ":old": start_cursor or "", ":now": _now(), ":counts": counts}
     try:
         table.update_item(
@@ -410,3 +464,5 @@ def _save_cursor(
         if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
         logger.warning("Cursor changed by a concurrent sync; not saved", extra={"item_id": item_id})
+        return False
+    return True
