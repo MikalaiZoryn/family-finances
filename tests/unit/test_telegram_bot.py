@@ -153,6 +153,17 @@ def test_is_categorizable(item, expected):
     assert app.is_categorizable(item) is expected
 
 
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        ({"amount": Decimal("5"), "apple_type": "Purchase"}, True),
+        ({"amount": Decimal("5"), "apple_type": "Payment"}, False),
+    ],
+)
+def test_is_categorizable_apple_card(item, expected):
+    assert app.is_categorizable(item) is expected
+
+
 # ----------------------------------------------------------------------
 # Sending
 # ----------------------------------------------------------------------
@@ -365,3 +376,79 @@ def test_non_callback_updates_are_ignored(aws, telegram):
 
     assert response["statusCode"] == 200
     assert telegram.answers == []
+
+
+# ----------------------------------------------------------------------
+# CSV documents (Apple Card import)
+# ----------------------------------------------------------------------
+
+
+class FakeLambda:
+    def __init__(self):
+        self.invokes = []
+
+    def invoke(self, **kwargs):
+        self.invokes.append(kwargs)
+
+
+@pytest.fixture
+def lambda_client(aws, monkeypatch):
+    fake = FakeLambda()
+    real_client = app.boto3.client
+
+    def client(name, *args, **kwargs):
+        return fake if name == "lambda" else real_client(name, *args, **kwargs)
+
+    monkeypatch.setattr(app.boto3, "client", client)
+    monkeypatch.setenv("APPLE_CARD_IMPORT_FUNCTION", "import-fn")
+    return fake
+
+
+def document_event(chat_id=CHAT_ID, user_id=USER_ID, file_name="Apple Card.csv", size=500):
+    event = callback_event("unused")
+    event["body"] = json.dumps(
+        {
+            "update_id": 3,
+            "message": {
+                "message_id": 77,
+                "from": {"id": user_id, "is_bot": False, "first_name": "Test"},
+                "chat": {"id": chat_id},
+                "document": {"file_id": "file-1", "file_name": file_name, "file_size": size},
+            },
+        }
+    )
+    return event
+
+
+def test_csv_document_starts_import(aws, telegram, lambda_client):
+    response = app.lambda_handler(document_event(), None)
+
+    assert response["statusCode"] == 200
+    [invoke] = lambda_client.invokes
+    assert invoke["FunctionName"] == "import-fn"
+    assert invoke["InvocationType"] == "Event"
+    assert json.loads(invoke["Payload"]) == {
+        "file_id": "file-1",
+        "file_name": "Apple Card.csv",
+        "chat_id": CHAT_ID,
+        "message_id": 77,
+        "user_id": USER_ID,
+    }
+    assert telegram.sent == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"chat_id": 999},
+        {"user_id": 7},
+        {"file_name": "photo.jpg"},
+        {"size": app.MAX_CSV_BYTES + 1},
+    ],
+)
+def test_other_documents_are_ignored(aws, telegram, lambda_client, kwargs):
+    response = app.lambda_handler(document_event(**kwargs), None)
+
+    assert response["statusCode"] == 200
+    assert lambda_client.invokes == []
+    assert telegram.sent == []

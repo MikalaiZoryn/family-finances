@@ -26,6 +26,7 @@ class TelegramError(Exception):
 class TelegramClient:
     def __init__(self, bot_token: str, timeout: float = 10):
         self._base_url = f"{BASE_URL}/bot{bot_token}"
+        self._file_url = f"{BASE_URL}/file/bot{bot_token}"
         self._timeout = timeout
 
     def _post(self, method: str, body: dict[str, Any]) -> Any:
@@ -52,11 +53,20 @@ class TelegramClient:
         return payload.get("result")
 
     def send_message(
-        self, chat_id: int | str, text: str, reply_markup: dict[str, Any] | None = None
+        self,
+        chat_id: int | str,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+        reply_to_message_id: int | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         if reply_markup:
             body["reply_markup"] = reply_markup
+        if reply_to_message_id:
+            body["reply_parameters"] = {
+                "message_id": reply_to_message_id,
+                "allow_sending_without_reply": True,
+            }
         try:
             return self._post("sendMessage", body)
         except TelegramError as e:
@@ -88,3 +98,19 @@ class TelegramClient:
         if reply_markup:
             body["reply_markup"] = reply_markup
         return self._post("editMessageText", body)
+
+    def get_file(self, file_id: str) -> dict[str, Any]:
+        """File metadata, including the file_path to download it (valid for an hour)."""
+        return self._post("getFile", {"file_id": file_id})
+
+    def download_file(self, file_path: str, max_bytes: int) -> bytes:
+        request = urllib.request.Request(f"{self._file_url}/{file_path}")
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                data = response.read(max_bytes + 1)
+        except urllib.error.HTTPError as e:
+            # The URL contains the bot token: never include it in the error.
+            raise TelegramError("File download failed", e.code) from None
+        if len(data) > max_bytes:
+            raise TelegramError(f"File larger than {max_bytes} bytes")
+        return data

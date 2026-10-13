@@ -1,13 +1,15 @@
 # Family Finances v1
 
-Serverless service that syncs family transactions from Plaid into DynamoDB and
-asks for their categories through a private Telegram bot. See
+Serverless service that syncs family transactions from Plaid (and Apple Card CSV
+exports posted to the family chat) into DynamoDB and asks for their categories through a private Telegram bot. See
 [Requirements.txt](Requirements.txt) for the full requirements.
 
 > Status: Plaid sync Lambda implemented; real banks are linked with Hosted Link
 > from `scripts/plaid_link.py`. Plaid webhooks are signature-verified, and each
 > sync sends its new expenses to Telegram right away. Telegram Lambda sweeps up
-> any expenses still unsent and saves the chosen category. Aggregation
+> any expenses still unsent and saves the chosen category. Apple Card CSV
+> exports posted to the family chat are imported (and re-imported without
+> duplicates) by the Apple Card import Lambda. Aggregation
 > Lambda totals categorized expenses against monthly budgets and posts a report
 > (no schedules yet; all runs are manual invokes). Plaid integration state and
 > remaining setup tasks: [PLAID_PLAN.md](PLAID_PLAN.md).
@@ -20,6 +22,7 @@ samconfig.toml             SAM CLI defaults (stack family-finances, us-east-1)
 infra/github-oidc.yaml     One-time bootstrap: GitHub OIDC, deploy roles, artifacts bucket
 src/plaid_sync/            Plaid webhook Lambda
 src/telegram_bot/          Telegram webhook Lambda
+src/apple_card_import/     Apple Card CSV import Lambda (started by the Telegram bot)
 src/aggregation/           Monthly budget aggregation Lambda
 src/shared/                Lambda layer with shared code (import as `shared`)
 events/                    Sample API Gateway events for `sam local invoke`
@@ -31,7 +34,8 @@ tests/                     Unit tests
 
 ## Data model
 
-`TransactionsTable` — partition key `transaction_id` (Plaid transaction ID).
+`TransactionsTable` — partition key `transaction_id` (Plaid transaction ID, or
+`apple-<hash>` for Apple Card rows).
 
 | Attribute             | Notes                                                                |
 |-----------------------|----------------------------------------------------------------------|
@@ -45,6 +49,9 @@ tests/                     Unit tests
 | `expense_category`    | **Absent** until the user categorizes it (never stored as NULL)      |
 | `telegram_message_id`, `telegram_chat_id`, `telegram_sent_at` | Set when sent to Telegram; prevents re-sending |
 | `categorized_at`, `categorized_by` | When and by which Telegram user ID the category was chosen |
+| `source`              | `apple_card` for Apple Card rows; absent for Plaid rows              |
+| `clearing_date`, `apple_category`, `apple_type`, `purchased_by` | Apple Card CSV fields |
+| `import_file_name`, `imported_by` | File and Telegram user ID that first imported the Apple Card row |
 
 Plaid fields that are null are omitted. The sync only `SET`s Plaid-owned
 attributes, so `expense_category` and `telegram_*` fields survive updates.
@@ -123,6 +130,36 @@ is recorded. Older transactions are skipped on every later sync too.
 change with the command to run (`plaid_link.py update <item_id>`). Transient
 errors (e.g. `INSTITUTION_DOWN`) fail the async invoke so Lambda retries it.
 
+## Apple Card import
+
+Apple Card isn't available through Plaid, so its transactions come from the
+CSV export (Wallet → Apple Card → Card Balance → Export Transactions). Anyone in
+`ALLOWED_TELEGRAM_USER_IDS` posts the file to the `TELEGRAM_CHAT_ID` chat; the
+Telegram Lambda checks the chat, the sender, the `.csv` name and the size
+(`MAX_CSV_BYTES`, 1 MB) and starts the import as an async invoke. Other files and
+chats are ignored silently.
+
+The import Lambda downloads the file, stores the rows and replies to the message
+with a summary (`5 new, 2 updated, 40 unchanged · 4 sent for categorization`).
+New expenses are sent for categorization like Plaid's (at most
+`MAX_MESSAGES_PER_IMPORT`, 20); Apple `Payment` rows are stored but never sent.
+A file without the expected columns gets an error reply. Failed imports aren't
+retried (they already replied); post the file again.
+
+**Re-imports** — exports overlap, and Apple has no transaction ID, so file rows
+are matched to stored Apple Card rows dated within the file's range:
+
+1. Same date, description, amount and `Purchased By` → the same transaction.
+2. Otherwise same date, description and buyer with a different amount (a tip
+   added when the charge cleared, a gas-station hold) → the same transaction,
+   updated in place.
+3. Otherwise a new row, ID `apple-` + 24 hex of a SHA-256 of those fields and an
+   occurrence counter (two identical coffees on one day stay two rows).
+
+Matched rows get only their CSV fields updated (clearing date, status, amount, …);
+the category and Telegram fields are kept. Stored rows that are missing from a
+later file are kept, never deleted.
+
 ## Telegram categorization
 
 Categories are defined in `src/telegram_bot/app.py` (`CATEGORIES`): `essential`
@@ -132,12 +169,13 @@ Categories are defined in `src/telegram_bot/app.py` (`CATEGORIES`): `essential`
 (Miscellaneous). The key is stored in `expense_category`; the label is shown on
 the buttons, two per row (`BUTTONS_PER_ROW`).
 
-**Sending** — new expenses are normally sent by the Plaid sync (above). Any
+**Sending** — new expenses are normally sent by the Plaid sync and the Apple
+Card import (above). Any
 non-HTTP invoke of the Telegram Lambda is a fallback sweep: it scans for
 transactions without `expense_category` and `telegram_message_id`, keeps only
 expenses (`amount > 0`, pending or posted) and skips transfers
 (`TRANSFER_IN` / `TRANSFER_OUT`), income/payroll (`INCOME`) and credit card
-payments (`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`). Oldest first, at most
+payments (`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, Apple `Payment`). Oldest first, at most
 `MAX_MESSAGES_PER_RUN` (20) per run go to `TELEGRAM_CHAT_ID`, one message per
 transaction with a button per category.
 
@@ -204,6 +242,8 @@ sam build
 sam local invoke PlaidSyncFunction -e events/plaid_webhook.json
 sam local invoke TelegramBotFunction -e events/telegram_update.json
 sam local invoke TelegramBotFunction -e events/telegram_send.json
+sam local invoke TelegramBotFunction -e events/telegram_document.json
+sam local invoke AppleCardImportFunction -e events/apple_card_import.json
 sam local invoke AggregationFunction -e events/aggregation_run.json
 ```
 
@@ -250,6 +290,12 @@ sam local invoke AggregationFunction -e events/aggregation_run.json
    `https://api.telegram.org/bot<bot_token>/getUpdates` and copy
    `message.chat.id` (negative for groups). For a private chat it equals your
    user ID. Set it as the `TELEGRAM_CHAT_ID` variable and redeploy.
+
+6. **Let the bot see CSV files in a group** (Apple Card import): bots in groups
+   only receive commands and replies unless privacy mode is off. In BotFather run
+   `/setprivacy` → your bot → *Disable*, then remove the bot from the group and
+   add it again (or make it a group admin). If `setWebhook` was called with
+   `allowed_updates`, make sure the list includes `message`.
 
    Secrets, tables and their data are retained if the stack is deleted.
 

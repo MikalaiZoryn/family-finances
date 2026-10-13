@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Family Finances - Plaid transaction sync, Telegram categorization bot and
-  monthly budget aggregation.
+  Family Finances - Plaid transaction sync, Apple Card CSV import, Telegram
+  categorization bot and monthly budget aggregation.
 
 Parameters:
   AllowedTelegramUserIds:
@@ -238,11 +238,14 @@ Resources:
           ALLOWED_TELEGRAM_USER_IDS: !Ref AllowedTelegramUserIds
           TELEGRAM_CHAT_ID: !Ref TelegramChatId
           MAX_MESSAGES_PER_RUN: "20"
+          APPLE_CARD_IMPORT_FUNCTION: !Ref AppleCardImportFunction
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TransactionsTable
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Ref TelegramSecret
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AppleCardImportFunction
       Events:
         TelegramWebhook:
           Type: HttpApi
@@ -250,6 +253,37 @@ Resources:
             ApiId: !Ref WebhookApi
             Method: POST
             Path: /webhooks/telegram
+
+  AppleCardImportLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-apple-card-import
+      RetentionInDays: 30
+
+  AppleCardImportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/apple_card_import/
+      Handler: app.lambda_handler
+      # Room for the download, the upserts and up to MAX_MESSAGES_PER_IMPORT messages.
+      Timeout: 120
+      MemorySize: 256
+      LoggingConfig:
+        LogGroup: !Ref AppleCardImportLogGroup
+      # A failed import has already replied in the chat; the user can post the file again.
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          TELEGRAM_SECRET_ARN: !Ref TelegramSecret
+          TELEGRAM_CHAT_ID: !Ref TelegramChatId
+          MAX_MESSAGES_PER_IMPORT: "20"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref TelegramSecret
 
   AggregationLogGroup:
     Type: AWS::Logs::LogGroup
@@ -299,6 +333,8 @@ Outputs:
     Value: !Ref CategoryStateTable
   PlaidSyncFunctionName:
     Value: !Ref PlaidSyncFunction
+  AppleCardImportFunctionName:
+    Value: !Ref AppleCardImportFunction
   PlaidSecretArn:
     Value: !Ref PlaidSecret
   TelegramSecretArn:

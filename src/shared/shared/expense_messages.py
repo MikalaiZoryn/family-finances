@@ -1,17 +1,18 @@
 """Telegram messages that ask the user to categorize an expense.
 
-Used by the Plaid sync (new transactions, right after a sync) and by the Telegram bot
-(sweep of anything not sent yet, and button presses).
+Used by the Plaid sync and the Apple Card import (new transactions, right after they are
+stored) and by the Telegram bot (sweep of anything not sent yet, and button presses).
 """
 
 import html
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 from shared.categories import CATEGORIES
-from shared.telegram import TelegramClient
+from shared.telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger()
 
@@ -22,6 +23,7 @@ MAX_CALLBACK_DATA_BYTES = 64
 # Not expenses the user needs to categorize.
 EXCLUDED_PRIMARY_CATEGORIES = {"TRANSFER_IN", "TRANSFER_OUT", "INCOME"}
 EXCLUDED_DETAILED_CATEGORIES = {"LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"}
+EXCLUDED_APPLE_TYPES = {"Payment"}
 
 
 def is_categorizable(item: dict[str, Any]) -> bool:
@@ -29,6 +31,8 @@ def is_categorizable(item: dict[str, Any]) -> bool:
     if Decimal(str(item.get("amount", 0))) <= 0:
         return False
     if item.get("plaid_category_primary") in EXCLUDED_PRIMARY_CATEGORIES:
+        return False
+    if item.get("apple_type") in EXCLUDED_APPLE_TYPES:
         return False
     return item.get("plaid_category_detailed") not in EXCLUDED_DETAILED_CATEGORIES
 
@@ -66,9 +70,13 @@ def format_message(item: dict[str, Any]) -> str:
         if item.get("account_mask"):
             account += f" ••{item['account_mask']}"
         lines.append(html.escape(account))
+    if item.get("purchased_by"):
+        lines.append(f"By {html.escape(item['purchased_by'])}")
     plaid_category = item.get("plaid_category_detailed") or item.get("plaid_category_primary")
     if plaid_category:
         lines.append(f"Plaid: {html.escape(plaid_category)}")
+    if item.get("apple_category"):
+        lines.append(f"Apple: {html.escape(item['apple_category'])}")
     return "\n".join(lines)
 
 
@@ -98,3 +106,47 @@ def send_expense(client: TelegramClient, table, chat_id: int | str, item: dict[s
         },
     )
     return True
+
+
+def send_new_expenses(
+    client_factory: Callable[[], TelegramClient],
+    table,
+    chat_id: int | str | None,
+    rows: list[dict[str, Any]],
+    max_messages: int,
+) -> int:
+    """Send just-stored expenses for categorization; return how many were sent.
+
+    Skips rows already sent or categorized (e.g. inherited from a pending row). Oldest
+    first, at most max_messages. Never raises: whatever is not sent here is left for the
+    Telegram bot's sweep of unsent expenses.
+    """
+    to_send = sorted(
+        (
+            row
+            for row in rows
+            if is_categorizable(row)
+            and "telegram_message_id" not in row
+            and "expense_category" not in row
+        ),
+        key=lambda row: (row["transaction_date"], row["transaction_id"]),
+    )
+    if not to_send:
+        return 0
+    if not chat_id:
+        logger.warning("TELEGRAM_CHAT_ID not set; new expenses not sent")
+        return 0
+    if len(to_send) > max_messages:
+        logger.info(
+            "More new expenses than the per-run limit; the rest wait for the sweep",
+            extra={"new_expenses": len(to_send), "max_messages": max_messages},
+        )
+    sent = 0
+    try:
+        client = client_factory()
+        for row in to_send[:max_messages]:
+            if send_expense(client, table, chat_id, row):
+                sent += 1
+    except (TelegramError, KeyError) as e:
+        logger.error("New expenses not sent to Telegram", extra={"error": str(e), "sent": sent})
+    return sent

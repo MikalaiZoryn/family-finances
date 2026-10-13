@@ -165,3 +165,9 @@ logs/
 tmp/
 *.tmp
 *.bak
+
+# ==============================================================
+# Financial exports (real data) and Windows download markers
+# ==============================================================
+*.csv
+*:Zone.Identifier

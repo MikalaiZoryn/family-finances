@@ -18,10 +18,11 @@ from botocore.exceptions import ClientError
 
 from shared import plaid_webhook
 from shared.aws_secrets import get_secret_json
-from shared.expense_messages import is_categorizable, send_expense
+from shared.expense_messages import send_new_expenses
 from shared.http import json_response
 from shared.plaid import PlaidClient, PlaidError
 from shared.telegram import TelegramClient, TelegramError
+from shared.transactions import upsert_transaction
 
 logger = logging.getLogger()
 
@@ -279,7 +280,7 @@ def sync_item(item_id: str) -> dict[str, Any]:
             continue
         item = to_item(txn, item_id, page["accounts"])
         carry_over = _pending_carry_over(transactions_table, item.get("pending_transaction_id"))
-        row = _upsert_transaction(transactions_table, item, carry_over)
+        row = upsert_transaction(transactions_table, item, carry_over)
         if txn["transaction_id"] in added_ids:
             added_rows.append(row)
         upserted += 1
@@ -314,37 +315,13 @@ def notify_new_expenses(table, rows: list[dict[str, Any]]) -> int:
     Never raises: the cursor is already saved, so whatever is not sent here is left for
     the Telegram bot's sweep of unsent expenses.
     """
-    to_send = sorted(
-        (
-            row
-            for row in rows
-            if is_categorizable(row)
-            and "telegram_message_id" not in row
-            and "expense_category" not in row
-        ),
-        key=lambda row: (row["transaction_date"], row["transaction_id"]),
+    return send_new_expenses(
+        _telegram_client,
+        table,
+        os.environ.get("TELEGRAM_CHAT_ID"),
+        rows,
+        int(os.environ.get("MAX_MESSAGES_PER_SYNC", "20")),
     )
-    if not to_send:
-        return 0
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not chat_id:
-        logger.warning("TELEGRAM_CHAT_ID not set; new expenses not sent")
-        return 0
-    max_messages = int(os.environ.get("MAX_MESSAGES_PER_SYNC", "20"))
-    if len(to_send) > max_messages:
-        logger.info(
-            "More new expenses than MAX_MESSAGES_PER_SYNC; the rest wait for the sweep",
-            extra={"new_expenses": len(to_send), "max_messages": max_messages},
-        )
-    sent = 0
-    try:
-        client = _telegram_client()
-        for row in to_send[:max_messages]:
-            if send_expense(client, table, chat_id, row):
-                sent += 1
-    except (TelegramError, KeyError) as e:
-        logger.error("New expenses not sent to Telegram", extra={"error": str(e), "sent": sent})
-    return sent
 
 
 def _fetch_all_pages(
@@ -413,36 +390,6 @@ def _pending_carry_over(table, pending_transaction_id: str | None) -> dict[str, 
         return {}
     pending = table.get_item(Key={"transaction_id": pending_transaction_id}).get("Item") or {}
     return {k: pending[k] for k in CARRY_OVER_ATTRIBUTES if k in pending}
-
-
-def _upsert_transaction(
-    table, item: dict[str, Any], carry_over: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Update only Plaid-owned fields, preserving user/bot fields like expense_category.
-
-    carry_over attributes are set only if the item does not already have them.
-    Returns the stored row.
-    """
-    names = {"#updated_at": "updated_at", "#created_at": "created_at"}
-    values: dict[str, Any] = {":now": _now()}
-    sets = ["#updated_at = :now", "#created_at = if_not_exists(#created_at, :now)"]
-    for i, (attr, value) in enumerate(item.items()):
-        if attr == "transaction_id":
-            continue
-        names[f"#a{i}"] = attr
-        values[f":v{i}"] = value
-        sets.append(f"#a{i} = :v{i}")
-    for i, (attr, value) in enumerate((carry_over or {}).items()):
-        names[f"#c{i}"] = attr
-        values[f":c{i}"] = value
-        sets.append(f"#c{i} = if_not_exists(#c{i}, :c{i})")
-    return table.update_item(
-        Key={"transaction_id": item["transaction_id"]},
-        UpdateExpression="SET " + ", ".join(sets),
-        ExpressionAttributeNames=names,
-        ExpressionAttributeValues=values,
-        ReturnValues="ALL_NEW",
-    )["Attributes"]
 
 
 def _save_cursor(
