@@ -180,7 +180,17 @@ Resources:
                 Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppStackName}-*
                 Condition:
                   StringEquals:
-                    iam:PassedToService: lambda.amazonaws.com
+                    iam:PassedToService:
+                      - lambda.amazonaws.com
+                      - scheduler.amazonaws.com
+              - Sid: Schedules
+                Effect: Allow
+                Action:
+                  - scheduler:CreateSchedule
+                  - scheduler:GetSchedule
+                  - scheduler:UpdateSchedule
+                  - scheduler:DeleteSchedule
+                Resource: !Sub arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/${AppStackName}-*
 
   # Role assumed by GitHub Actions via OIDC. It can only drive CloudFormation
   # for the app stack; resource changes are made by the execution role above.

@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import boto3
@@ -345,3 +346,24 @@ def test_handler_sends_report(aws, telegram):
 def test_handler_defaults_to_current_month(aws, telegram):
     result = app.lambda_handler({}, None)
     assert app.MONTH_PATTERN.match(result["month"])
+
+
+@pytest.mark.parametrize(
+    ("utc_now", "expected"),
+    [
+        # 22:30 PDT on Oct 31 is already Nov 1 in UTC.
+        (datetime(2026, 11, 1, 5, 30, tzinfo=UTC), "2026-10"),
+        # 22:30 PST on Dec 31 is already Jan 1 in UTC.
+        (datetime(2027, 1, 1, 6, 30, tzinfo=UTC), "2026-12"),
+        (datetime(2026, 11, 1, 8, 0, tzinfo=UTC), "2026-11"),
+    ],
+)
+def test_current_month_uses_timezone(monkeypatch, utc_now, expected):
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return utc_now.astimezone(tz)
+
+    monkeypatch.setattr(app, "datetime", FrozenDatetime)
+    monkeypatch.setenv("TIMEZONE", "America/Los_Angeles")
+    assert app.current_month() == expected

@@ -13,6 +13,10 @@ Parameters:
     Type: String
     Default: ""
     Description: Telegram chat ID that receives transactions to categorize (private chat or group).
+  TimeZone:
+    Type: String
+    Default: America/Los_Angeles
+    Description: IANA time zone for the daily schedules and the aggregation's current month.
 
 Globals:
   Function:
@@ -253,6 +257,14 @@ Resources:
             ApiId: !Ref WebhookApi
             Method: POST
             Path: /webhooks/telegram
+        # Daily reconciliation: sends uncategorized expenses that never got a message.
+        DailyReconciliation:
+          Type: ScheduleV2
+          Properties:
+            Name: !Sub ${AWS::StackName}-telegram-reconciliation
+            ScheduleExpression: cron(0 22 * * ? *)
+            ScheduleExpressionTimezone: !Ref TimeZone
+            Input: "{}"
 
   AppleCardImportLogGroup:
     Type: AWS::Logs::LogGroup
@@ -306,6 +318,7 @@ Resources:
           CATEGORY_STATE_TABLE: !Ref CategoryStateTable
           TELEGRAM_SECRET_ARN: !Ref TelegramSecret
           TELEGRAM_CHAT_ID: !Ref TelegramChatId
+          TIMEZONE: !Ref TimeZone
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref TransactionsTable
@@ -315,6 +328,14 @@ Resources:
             TableName: !Ref CategoryStateTable
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Ref TelegramSecret
+      Events:
+        DailyAggregation:
+          Type: ScheduleV2
+          Properties:
+            Name: !Sub ${AWS::StackName}-aggregation
+            ScheduleExpression: cron(30 22 * * ? *)
+            ScheduleExpressionTimezone: !Ref TimeZone
+            Input: "{}"
 
 Outputs:
   PlaidWebhookUrl:

@@ -1,8 +1,8 @@
 """Monthly budget aggregation.
 
-Invoked directly (manual now, a schedule later). Totals categorized expenses per
-category for the month, updates CategoryStateTable and posts a report to the
-Telegram chat. Event: {} for the current UTC month, or {"month": "YYYY-MM"}.
+Invoked daily by an EventBridge schedule (or manually). Totals categorized expenses
+per category for the month, updates CategoryStateTable and posts a report to the
+Telegram chat. Event: {} for the current month in TIMEZONE, or {"month": "YYYY-MM"}.
 
 Budget rules (limit -1 = no limit; P = the previous month's state row):
 - limit == -1                                   -> budget = -1
@@ -18,6 +18,7 @@ import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -62,8 +63,14 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def current_month() -> str:
+    """The month in TIMEZONE: the 22:30 PT run on the 31st is already the 1st in UTC."""
+    tz = ZoneInfo(os.environ.get("TIMEZONE", "America/Los_Angeles"))
+    return datetime.now(tz).strftime("%Y-%m")
+
+
 def lambda_handler(event, context):
-    month = (event or {}).get("month") or datetime.now(UTC).strftime("%Y-%m")
+    month = (event or {}).get("month") or current_month()
     rows = aggregate(month)
     _telegram_client().send_message(os.environ["TELEGRAM_CHAT_ID"], format_report(month, rows))
     logger.info("Budget aggregated", extra={"month": month})

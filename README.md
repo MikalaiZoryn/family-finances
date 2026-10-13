@@ -11,7 +11,8 @@ exports posted to the family chat) into DynamoDB and asks for their categories t
 > exports posted to the family chat are imported (and re-imported without
 > duplicates) by the Apple Card import Lambda. Aggregation
 > Lambda totals categorized expenses against monthly budgets and posts a report
-> (no schedules yet; all runs are manual invokes). Plaid integration state and
+> daily at 22:30 America/Los_Angeles; the Telegram sweep runs daily at 22:00 as a
+> reconciliation. Plaid integration state and
 > remaining setup tasks: [PLAID_PLAN.md](PLAID_PLAN.md).
 
 ## Layout
@@ -171,7 +172,9 @@ the buttons, two per row (`BUTTONS_PER_ROW`).
 
 **Sending** — new expenses are normally sent by the Plaid sync and the Apple
 Card import (above). Any
-non-HTTP invoke of the Telegram Lambda is a fallback sweep: it scans for
+non-HTTP invoke of the Telegram Lambda is a fallback sweep, run daily at 22:00
+`TimeZone` (default `America/Los_Angeles`) by the EventBridge schedule
+`family-finances-telegram-reconciliation`: it scans for
 transactions without `expense_category` and `telegram_message_id`, keeps only
 expenses (`amount > 0`, pending or posted) and skips transfers
 (`TRANSFER_IN` / `TRANSFER_OUT`), income/payroll (`INCOME`) and credit card
@@ -199,7 +202,10 @@ aws dynamodb put-item --table-name <CategoryLimitsTableName> \
   --item '{"category":{"S":"essential"},"limit":{"N":"1000"}}'
 ```
 
-Each run (`{}` = current UTC month, or `{"month": "YYYY-MM"}`) does this for every category:
+The EventBridge schedule `family-finances-aggregation` runs it daily at 22:30
+`TimeZone` (default `America/Los_Angeles`). Each run (`{}` = current month in
+`TimeZone`, so the run on the last day still reports the closing month; or
+`{"month": "YYYY-MM"}`) does this for every category:
 
 1. Recompute the previous month's `current_expenses`, so transactions from last
    month that were categorized late still count.
