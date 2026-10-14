@@ -11,5 +11,6 @@ CATEGORIES = {
     "subscription": "🔁 Subscription",
     "emotional": "💖 Emotional",
     "sport": "⚽ Sport",
+    "transportation": "🚗 Transportation",
     "miscellaneous": "📦 Miscellaneous",
 }

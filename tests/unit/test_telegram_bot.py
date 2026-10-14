@@ -226,21 +226,20 @@ def test_message_content_and_buttons(aws, telegram):
             [
                 {"text": "🍔 Food", "callback_data": "cat:t1:food"},
                 {"text": "🧾 Essentials", "callback_data": "cat:t1:essentials"},
-            ],
-            [
                 {"text": "⚡ Unexpected", "callback_data": "cat:t1:unexpected"},
-                {"text": "🧴 Household Supply", "callback_data": "cat:t1:household_supply"},
             ],
             [
+                {"text": "🧴 Household Supply", "callback_data": "cat:t1:household_supply"},
                 {"text": "🎉 Weekends Fun", "callback_data": "cat:t1:weekends_fun"},
                 {"text": "📈 Investment", "callback_data": "cat:t1:investment"},
             ],
             [
                 {"text": "🔁 Subscription", "callback_data": "cat:t1:subscription"},
                 {"text": "💖 Emotional", "callback_data": "cat:t1:emotional"},
+                {"text": "⚽ Sport", "callback_data": "cat:t1:sport"},
             ],
             [
-                {"text": "⚽ Sport", "callback_data": "cat:t1:sport"},
+                {"text": "🚗 Transportation", "callback_data": "cat:t1:transportation"},
                 {"text": "📦 Miscellaneous", "callback_data": "cat:t1:miscellaneous"},
             ],
         ]

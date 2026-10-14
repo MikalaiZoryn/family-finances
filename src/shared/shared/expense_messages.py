@@ -16,7 +16,7 @@ from shared.telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger()
 
-BUTTONS_PER_ROW = 2
+BUTTONS_PER_ROW = 3
 CALLBACK_PREFIX = "cat"
 MAX_CALLBACK_DATA_BYTES = 64
 
