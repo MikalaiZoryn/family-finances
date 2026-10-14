@@ -181,7 +181,7 @@ def test_sends_only_uncategorized_expenses(aws, telegram):
         plaid_category_primary="LOAN_PAYMENTS",
         plaid_category_detailed="LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
     )
-    put_txn(aws, "categorized", expense_category="hobby")
+    put_txn(aws, "categorized", expense_category="food")
     put_txn(aws, "already-sent", telegram_message_id=1)
 
     result = app.lambda_handler({}, None)
@@ -224,20 +224,24 @@ def test_message_content_and_buttons(aws, telegram):
     assert message["reply_markup"] == {
         "inline_keyboard": [
             [
-                {"text": "Essential", "callback_data": "cat:t1:essential"},
-                {"text": "Weekend Fun", "callback_data": "cat:t1:weekend_fun"},
+                {"text": "🍔 Food", "callback_data": "cat:t1:food"},
+                {"text": "🧾 Essentials", "callback_data": "cat:t1:essentials"},
             ],
             [
-                {"text": "Hobby", "callback_data": "cat:t1:hobby"},
-                {"text": "Sport", "callback_data": "cat:t1:sport"},
+                {"text": "⚡ Unexpected", "callback_data": "cat:t1:unexpected"},
+                {"text": "🧴 Household Supply", "callback_data": "cat:t1:household_supply"},
             ],
             [
-                {"text": "Subscription", "callback_data": "cat:t1:subscription"},
-                {"text": "Investment", "callback_data": "cat:t1:investment"},
+                {"text": "🎉 Weekends Fun", "callback_data": "cat:t1:weekends_fun"},
+                {"text": "📈 Investment", "callback_data": "cat:t1:investment"},
             ],
             [
-                {"text": "Vacation", "callback_data": "cat:t1:vacation"},
-                {"text": "Miscellaneous", "callback_data": "cat:t1:miscellaneous"},
+                {"text": "🔁 Subscription", "callback_data": "cat:t1:subscription"},
+                {"text": "💖 Emotional", "callback_data": "cat:t1:emotional"},
+            ],
+            [
+                {"text": "⚽ Sport", "callback_data": "cat:t1:sport"},
+                {"text": "📦 Miscellaneous", "callback_data": "cat:t1:miscellaneous"},
             ],
         ]
     }
@@ -282,7 +286,7 @@ def test_too_long_transaction_id_is_skipped(aws, telegram):
 def test_webhook_rejects_bad_secret_token(aws, telegram, secret):
     put_txn(aws, "t1")
 
-    response = app.lambda_handler(callback_event("cat:t1:essential", secret=secret), None)
+    response = app.lambda_handler(callback_event("cat:t1:essentials", secret=secret), None)
 
     assert response["statusCode"] == 401
     assert "expense_category" not in get_txn(aws, "t1")
@@ -290,7 +294,7 @@ def test_webhook_rejects_bad_secret_token(aws, telegram, secret):
 
 
 def test_webhook_invalid_body_returns_400(aws, telegram):
-    event = callback_event("cat:t1:essential")
+    event = callback_event("cat:t1:essentials")
     event["body"] = "not json"
 
     response = app.lambda_handler(event, None)
@@ -301,24 +305,24 @@ def test_webhook_invalid_body_returns_400(aws, telegram):
 def test_callback_saves_category(aws, telegram):
     put_txn(aws, "t1")
 
-    response = app.lambda_handler(callback_event("cat:t1:weekend_fun"), None)
+    response = app.lambda_handler(callback_event("cat:t1:weekends_fun"), None)
 
     assert response["statusCode"] == 200
     item = get_txn(aws, "t1")
-    assert item["expense_category"] == "weekend_fun"
+    assert item["expense_category"] == "weekends_fun"
     assert item["categorized_by"] == USER_ID
     assert "categorized_at" in item
-    assert telegram.answers == [{"id": "cb-1", "text": "Saved: Weekend Fun"}]
+    assert telegram.answers == [{"id": "cb-1", "text": "Saved: 🎉 Weekends Fun"}]
     edit = telegram.edits[0]
     assert (edit["chat_id"], edit["message_id"], edit["markup"]) == (CHAT_ID, 101, None)
     assert "<b>Starbucks</b>" in edit["text"]
-    assert "Category: <b>Weekend Fun</b>" in edit["text"]
+    assert "Category: <b>🎉 Weekends Fun</b>" in edit["text"]
 
 
 def test_callback_from_disallowed_user(aws, telegram):
     put_txn(aws, "t1")
 
-    response = app.lambda_handler(callback_event("cat:t1:essential", user_id=999), None)
+    response = app.lambda_handler(callback_event("cat:t1:essentials", user_id=999), None)
 
     assert response["statusCode"] == 200
     assert "expense_category" not in get_txn(aws, "t1")
@@ -326,7 +330,7 @@ def test_callback_from_disallowed_user(aws, telegram):
     assert telegram.edits == []
 
 
-@pytest.mark.parametrize("data", ["cat:t1:groceries", "cat:t1", "other:t1:essential", ""])
+@pytest.mark.parametrize("data", ["cat:t1:groceries", "cat:t1", "other:t1:essentials", ""])
 def test_callback_with_unknown_data(aws, telegram, data):
     put_txn(aws, "t1")
 
@@ -337,7 +341,7 @@ def test_callback_with_unknown_data(aws, telegram, data):
 
 
 def test_callback_for_missing_transaction(aws, telegram):
-    app.lambda_handler(callback_event("cat:gone:essential"), None)
+    app.lambda_handler(callback_event("cat:gone:essentials"), None)
 
     assert get_txn(aws, "gone") is None
     assert telegram.answers == [{"id": "cb-1", "text": "Transaction no longer exists"}]
@@ -347,11 +351,11 @@ def test_callback_for_missing_transaction(aws, telegram):
 def test_callback_for_pending_that_has_posted(aws, telegram):
     put_txn(aws, "posted-1", pending_transaction_id="pending-1")
 
-    app.lambda_handler(callback_event("cat:pending-1:hobby"), None)
+    app.lambda_handler(callback_event("cat:pending-1:food"), None)
 
     assert get_txn(aws, "pending-1") is None
-    assert get_txn(aws, "posted-1")["expense_category"] == "hobby"
-    assert telegram.answers == [{"id": "cb-1", "text": "Saved: Hobby"}]
+    assert get_txn(aws, "posted-1")["expense_category"] == "food"
+    assert telegram.answers == [{"id": "cb-1", "text": "Saved: 🍔 Food"}]
 
 
 def test_telegram_errors_still_return_200(aws, telegram, monkeypatch):
@@ -362,14 +366,14 @@ def test_telegram_errors_still_return_200(aws, telegram, monkeypatch):
 
     monkeypatch.setattr(telegram, "edit_message_text", fail)
 
-    response = app.lambda_handler(callback_event("cat:t1:essential"), None)
+    response = app.lambda_handler(callback_event("cat:t1:essentials"), None)
 
     assert response["statusCode"] == 200
-    assert get_txn(aws, "t1")["expense_category"] == "essential"
+    assert get_txn(aws, "t1")["expense_category"] == "essentials"
 
 
 def test_non_callback_updates_are_ignored(aws, telegram):
-    event = callback_event("cat:t1:essential")
+    event = callback_event("cat:t1:essentials")
     event["body"] = json.dumps({"update_id": 2, "message": {"text": "/start"}})
 
     response = app.lambda_handler(event, None)

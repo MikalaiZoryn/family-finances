@@ -163,11 +163,12 @@ later file are kept, never deleted.
 
 ## Telegram categorization
 
-Categories are defined in `src/telegram_bot/app.py` (`CATEGORIES`): `essential`
-(Essential), `weekend_fun` (Weekend Fun), `hobby` (Hobby), `sport` (Sport),
-`subscription` (Subscription), `investment` (Investment), `vacation`
-(Vacation), `miscellaneous`
-(Miscellaneous). The key is stored in `expense_category`; the label is shown on
+Categories are defined in `src/shared/shared/categories.py` (`CATEGORIES`):
+`food` (Food), `essentials` (Essentials), `unexpected` (Unexpected),
+`household_supply` (Household Supply), `weekends_fun` (Weekends Fun),
+`investment` (Investment), `subscription` (Subscription), `emotional`
+(Emotional), `sport` (Sport), `miscellaneous` (Miscellaneous). Labels carry an
+emoji icon. The key is stored in `expense_category`; the label is shown on
 the buttons, two per row (`BUTTONS_PER_ROW`).
 
 **Sending** — new expenses are normally sent by the Plaid sync and the Apple
@@ -199,7 +200,7 @@ manually in `CategoryLimitsTable` (no bot commands yet):
 
 ```bash
 aws dynamodb put-item --table-name <CategoryLimitsTableName> \
-  --item '{"category":{"S":"essential"},"limit":{"N":"1000"}}'
+  --item '{"category":{"S":"essentials"},"limit":{"N":"1000"}}'
 ```
 
 The EventBridge schedule `family-finances-aggregation` runs it daily at 22:30

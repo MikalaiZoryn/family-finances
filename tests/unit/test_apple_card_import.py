@@ -227,7 +227,7 @@ def test_amount_change_updates_in_place_and_keeps_category(table, telegram):
     table.update_item(
         Key={"transaction_id": row["transaction_id"]},
         UpdateExpression="SET expense_category = :c",
-        ExpressionAttributeValues={":c": "weekend_fun"},
+        ExpressionAttributeValues={":c": "weekends_fun"},
     )
     telegram.sent.clear()
 
@@ -237,7 +237,7 @@ def test_amount_change_updates_in_place_and_keeps_category(table, telegram):
     [updated] = all_rows(table)
     assert updated["transaction_id"] == row["transaction_id"]
     assert updated["amount"] == Decimal("24.00")
-    assert updated["expense_category"] == "weekend_fun"
+    assert updated["expense_category"] == "weekends_fun"
     assert telegram.expenses() == []
 
 

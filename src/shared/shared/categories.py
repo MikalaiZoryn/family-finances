@@ -2,12 +2,14 @@
 
 # Key is stored in expense_category; label is shown to the user.
 CATEGORIES = {
-    "essential": "Essential",
-    "weekend_fun": "Weekend Fun",
-    "hobby": "Hobby",
-    "sport": "Sport",
-    "subscription": "Subscription",
-    "investment": "Investment",
-    "vacation": "Vacation",
-    "miscellaneous": "Miscellaneous",
+    "food": "🍔 Food",
+    "essentials": "🧾 Essentials",
+    "unexpected": "⚡ Unexpected",
+    "household_supply": "🧴 Household Supply",
+    "weekends_fun": "🎉 Weekends Fun",
+    "investment": "📈 Investment",
+    "subscription": "🔁 Subscription",
+    "emotional": "💖 Emotional",
+    "sport": "⚽ Sport",
+    "miscellaneous": "📦 Miscellaneous",
 }

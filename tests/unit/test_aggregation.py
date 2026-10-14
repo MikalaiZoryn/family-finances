@@ -173,101 +173,101 @@ def test_compute_budget(limit, prev, expected):
 
 
 def test_sums_only_the_months_categorized_transactions(aws):
-    put_txn(aws, "essential", "2026-10-01", "10.50")
-    put_txn(aws, "essential", "2026-10-31", "20")
-    put_txn(aws, "essential", "2026-09-30", "100")  # previous month
-    put_txn(aws, "essential", "2026-11-01", "100")  # next month
-    put_txn(aws, "hobby", "2026-10-05", "7")
+    put_txn(aws, "essentials", "2026-10-01", "10.50")
+    put_txn(aws, "essentials", "2026-10-31", "20")
+    put_txn(aws, "essentials", "2026-09-30", "100")  # previous month
+    put_txn(aws, "essentials", "2026-11-01", "100")  # next month
+    put_txn(aws, "food", "2026-10-05", "7")
     put_txn(aws, None, "2026-10-05", "1000")  # uncategorized
 
-    assert app.month_expenses("essential", "2026-10") == Decimal("30.50")
-    assert app.month_expenses("hobby", "2026-10") == Decimal("7")
-    assert app.month_expenses("sport", "2026-10") == Decimal("0")
+    assert app.month_expenses("essentials", "2026-10") == Decimal("30.50")
+    assert app.month_expenses("food", "2026-10") == Decimal("7")
+    assert app.month_expenses("unexpected", "2026-10") == Decimal("0")
 
 
 def test_first_run_creates_rows_for_all_categories(aws):
-    set_limit(aws, "essential", "1000")
-    put_txn(aws, "essential", "2026-10-02", "250")
+    set_limit(aws, "essentials", "1000")
+    put_txn(aws, "essentials", "2026-10-02", "250")
 
     rows = app.aggregate("2026-10")
 
     assert [row["category"] for row in rows] == list(CATEGORIES)
-    essential = get_state(aws, "essential", "2026-10")
+    essential = get_state(aws, "essentials", "2026-10")
     assert essential["limit"] == Decimal("1000")
     assert essential["budget"] == Decimal("1000")
     assert essential["current_expenses"] == Decimal("250")
-    hobby = get_state(aws, "hobby", "2026-10")  # no limit row
-    assert hobby["limit"] == Decimal("-1")
-    assert hobby["budget"] == Decimal("-1")
-    assert get_state(aws, "essential", "2026-09") is None
+    food = get_state(aws, "food", "2026-10")  # no limit row
+    assert food["limit"] == Decimal("-1")
+    assert food["budget"] == Decimal("-1")
+    assert get_state(aws, "essentials", "2026-09") is None
 
 
 def test_rerun_is_idempotent_and_picks_up_new_transactions(aws):
-    set_limit(aws, "essential", "1000")
-    put_txn(aws, "essential", "2026-10-02", "250")
+    set_limit(aws, "essentials", "1000")
+    put_txn(aws, "essentials", "2026-10-02", "250")
     app.aggregate("2026-10")
     app.aggregate("2026-10")
-    assert get_state(aws, "essential", "2026-10")["current_expenses"] == Decimal("250")
+    assert get_state(aws, "essentials", "2026-10")["current_expenses"] == Decimal("250")
 
-    put_txn(aws, "essential", "2026-10-03", "50")
+    put_txn(aws, "essentials", "2026-10-03", "50")
     app.aggregate("2026-10")
 
-    row = get_state(aws, "essential", "2026-10")
+    row = get_state(aws, "essentials", "2026-10")
     assert row["current_expenses"] == Decimal("300")
     assert row["budget"] == Decimal("1000")
 
 
 def test_limit_change_applies_from_next_month(aws):
-    set_limit(aws, "essential", "1000")
+    set_limit(aws, "essentials", "1000")
     app.aggregate("2026-10")
 
-    set_limit(aws, "essential", "2000")
+    set_limit(aws, "essentials", "2000")
     app.aggregate("2026-10")
-    assert get_state(aws, "essential", "2026-10")["budget"] == Decimal("1000")
+    assert get_state(aws, "essentials", "2026-10")["budget"] == Decimal("1000")
 
     app.aggregate("2026-11")
-    assert get_state(aws, "essential", "2026-11")["budget"] == Decimal("3000")
+    assert get_state(aws, "essentials", "2026-11")["budget"] == Decimal("3000")
 
 
 def test_rollover_carries_remainder(aws):
-    set_limit(aws, "essential", "1000")
-    set_limit(aws, "hobby", "100")
-    put_state(aws, "essential", "2026-09", "1000", "1000", "0")
-    put_state(aws, "hobby", "2026-09", "100", "100", "0")
-    put_txn(aws, "essential", "2026-09-10", "800")
-    put_txn(aws, "hobby", "2026-09-10", "150")
+    set_limit(aws, "essentials", "1000")
+    set_limit(aws, "food", "100")
+    put_state(aws, "essentials", "2026-09", "1000", "1000", "0")
+    put_state(aws, "food", "2026-09", "100", "100", "0")
+    put_txn(aws, "essentials", "2026-09-10", "800")
+    put_txn(aws, "food", "2026-09-10", "150")
 
     app.aggregate("2026-10")
 
-    assert get_state(aws, "essential", "2026-09")["current_expenses"] == Decimal("800")
-    assert get_state(aws, "essential", "2026-10")["budget"] == Decimal("1200")
-    assert get_state(aws, "hobby", "2026-10")["budget"] == Decimal("50")
+    assert get_state(aws, "essentials", "2026-09")["current_expenses"] == Decimal("800")
+    assert get_state(aws, "essentials", "2026-10")["budget"] == Decimal("1200")
+    assert get_state(aws, "food", "2026-10")["budget"] == Decimal("50")
 
 
 def test_late_transaction_updates_previous_month_and_current_budget(aws):
-    set_limit(aws, "essential", "1000")
-    put_txn(aws, "essential", "2026-09-10", "800")
+    set_limit(aws, "essentials", "1000")
+    put_txn(aws, "essentials", "2026-09-10", "800")
     app.aggregate("2026-09")
     app.aggregate("2026-10")
-    assert get_state(aws, "essential", "2026-10")["budget"] == Decimal("1200")
+    assert get_state(aws, "essentials", "2026-10")["budget"] == Decimal("1200")
 
-    put_txn(aws, "essential", "2026-09-30", "100")  # categorized in October
+    put_txn(aws, "essentials", "2026-09-30", "100")  # categorized in October
     app.aggregate("2026-10")
 
-    assert get_state(aws, "essential", "2026-09")["current_expenses"] == Decimal("900")
-    assert get_state(aws, "essential", "2026-10")["budget"] == Decimal("1100")
+    assert get_state(aws, "essentials", "2026-09")["current_expenses"] == Decimal("900")
+    assert get_state(aws, "essentials", "2026-10")["budget"] == Decimal("1100")
 
 
 def test_limit_transitions(aws):
-    put_state(aws, "essential", "2026-09", "-1", "-1", "500")  # had no limit
-    put_state(aws, "hobby", "2026-09", "100", "100", "20")  # had a limit
-    set_limit(aws, "essential", "1000")
-    set_limit(aws, "hobby", "-1")
+    put_state(aws, "essentials", "2026-09", "-1", "-1", "500")  # had no limit
+    put_state(aws, "food", "2026-09", "100", "100", "20")  # had a limit
+    set_limit(aws, "essentials", "1000")
+    set_limit(aws, "food", "-1")
 
     app.aggregate("2026-10")
 
-    assert get_state(aws, "essential", "2026-10")["budget"] == Decimal("1000")
-    assert get_state(aws, "hobby", "2026-10")["budget"] == Decimal("-1")
+    assert get_state(aws, "essentials", "2026-10")["budget"] == Decimal("1000")
+    assert get_state(aws, "food", "2026-10")["budget"] == Decimal("-1")
 
 
 # ----------------------------------------------------------------------
@@ -278,19 +278,19 @@ def test_limit_transitions(aws):
 def test_format_report():
     rows = [
         {
-            "category": "essential",
+            "category": "essentials",
             "limit": Decimal("1000"),
             "budget": Decimal("1000"),
             "current_expenses": Decimal("812.4"),
         },
         {
-            "category": "hobby",
+            "category": "food",
             "limit": Decimal("100"),
             "budget": Decimal("100"),
             "current_expenses": Decimal("120"),
         },
         {
-            "category": "sport",
+            "category": "unexpected",
             "limit": Decimal("-1"),
             "budget": Decimal("-1"),
             "current_expenses": Decimal("45"),
@@ -302,9 +302,9 @@ def test_format_report():
     assert text.splitlines() == [
         "📊 <b>Budget · October 2026</b>",
         "",
-        "Essential: $812 / $1,000 · $187 left",
-        "Hobby: $120 / $100 · ⚠️ $20 over",
-        "Sport: $45 · no limit",
+        "🧾 Essentials: $812 / $1,000 · $187 left",
+        "🍔 Food: $120 / $100 · ⚠️ $20 over",
+        "⚡ Unexpected: $45 · no limit",
         "",
         "<b>Total spent: $977</b>",
     ]
@@ -325,17 +325,17 @@ def test_money_truncates_cents(value, expected):
 
 
 def test_handler_sends_report(aws, telegram):
-    set_limit(aws, "essential", "1000")
-    put_txn(aws, "essential", "2026-10-02", "250")
+    set_limit(aws, "essentials", "1000")
+    put_txn(aws, "essentials", "2026-10-02", "250")
 
     result = app.lambda_handler({"month": "2026-10"}, None)
 
     assert len(telegram.sent) == 1
     assert telegram.sent[0]["chat_id"] == str(CHAT_ID)
-    assert "Essential: $250 / $1,000 · $750 left" in telegram.sent[0]["text"]
+    assert "🧾 Essentials: $250 / $1,000 · $750 left" in telegram.sent[0]["text"]
     assert result["month"] == "2026-10"
-    assert result["categories"][0] == {
-        "category": "essential",
+    assert result["categories"][1] == {
+        "category": "essentials",
         "limit": "1000",
         "budget": "1000",
         "current_expenses": "250",
