@@ -97,6 +97,9 @@ def get_txn(table, transaction_id):
     return table.get_item(Key={"transaction_id": transaction_id}).get("Item")
 
 
+CHANGE_MARKUP = {"inline_keyboard": [[{"text": "✏️ Change", "callback_data": "chg:t1"}]]}
+
+
 def callback_event(data, user_id=USER_ID, secret=WEBHOOK_SECRET):
     event = json.loads((EVENTS / "telegram_update.json").read_text())
     if secret is None:
@@ -313,7 +316,8 @@ def test_callback_saves_category(aws, telegram):
     assert "categorized_at" in item
     assert telegram.answers == [{"id": "cb-1", "text": "Saved: 🎉 Weekends Fun"}]
     edit = telegram.edits[0]
-    assert (edit["chat_id"], edit["message_id"], edit["markup"]) == (CHAT_ID, 101, None)
+    assert (edit["chat_id"], edit["message_id"]) == (CHAT_ID, 101)
+    assert edit["markup"] == CHANGE_MARKUP
     assert "<b>Starbucks</b>" in edit["text"]
     assert "Category: <b>🎉 Weekends Fun</b>" in edit["text"]
 
@@ -329,7 +333,10 @@ def test_callback_from_disallowed_user(aws, telegram):
     assert telegram.edits == []
 
 
-@pytest.mark.parametrize("data", ["cat:t1:groceries", "cat:t1", "other:t1:essentials", ""])
+@pytest.mark.parametrize(
+    "data",
+    ["cat:t1:groceries", "cat:t1", "other:t1:essentials", "", "chg", "chg:t1:food", "cnl:"],
+)
 def test_callback_with_unknown_data(aws, telegram, data):
     put_txn(aws, "t1")
 
@@ -355,6 +362,88 @@ def test_callback_for_pending_that_has_posted(aws, telegram):
     assert get_txn(aws, "pending-1") is None
     assert get_txn(aws, "posted-1")["expense_category"] == "food"
     assert telegram.answers == [{"id": "cb-1", "text": "Saved: 🍔 Food"}]
+
+
+def test_change_shows_buttons_with_current_ticked(aws, telegram):
+    put_txn(aws, "t1", expense_category="food", categorized_by=USER_ID)
+
+    app.lambda_handler(callback_event("chg:t1"), None)
+
+    assert telegram.answers == [{"id": "cb-1", "text": None}]
+    edit = telegram.edits[0]
+    assert (edit["chat_id"], edit["message_id"]) == (CHAT_ID, 101)
+    assert "Category: <b>🍔 Food</b>" in edit["text"]
+    rows = edit["markup"]["inline_keyboard"]
+    assert rows[0][0] == {"text": "🍔 Food ✓", "callback_data": "cat:t1:food"}
+    assert rows[0][1] == {"text": "🧾 Essentials", "callback_data": "cat:t1:essentials"}
+    assert rows[-1] == [{"text": "↩️ Cancel", "callback_data": "cnl:t1"}]
+    assert get_txn(aws, "t1")["expense_category"] == "food"
+
+
+def test_change_then_pick_another_category(aws, telegram):
+    put_txn(aws, "t1", expense_category="food", categorized_by=42)
+
+    app.lambda_handler(callback_event("chg:t1"), None)
+    app.lambda_handler(callback_event("cat:t1:sport"), None)
+
+    item = get_txn(aws, "t1")
+    assert item["expense_category"] == "sport"
+    assert item["categorized_by"] == USER_ID
+    assert telegram.answers[-1] == {"id": "cb-1", "text": "Saved: ⚽ Sport"}
+    assert "Category: <b>⚽ Sport</b>" in telegram.edits[-1]["text"]
+    assert telegram.edits[-1]["markup"] == CHANGE_MARKUP
+
+
+def test_cancel_restores_saved_category(aws, telegram):
+    put_txn(aws, "t1", expense_category="food", categorized_at="2026-10-05T10:00:00+00:00")
+
+    app.lambda_handler(callback_event("cnl:t1"), None)
+
+    assert telegram.answers == [{"id": "cb-1", "text": None}]
+    edit = telegram.edits[0]
+    assert "Category: <b>🍔 Food</b>" in edit["text"]
+    assert edit["markup"] == CHANGE_MARKUP
+    item = get_txn(aws, "t1")
+    assert item["expense_category"] == "food"
+    assert item["categorized_at"] == "2026-10-05T10:00:00+00:00"
+
+
+def test_change_for_pending_that_has_posted(aws, telegram):
+    put_txn(aws, "posted-1", pending_transaction_id="pending-1", expense_category="sport")
+
+    app.lambda_handler(callback_event("chg:pending-1"), None)
+
+    rows = telegram.edits[0]["markup"]["inline_keyboard"]
+    assert {"text": "⚽ Sport ✓", "callback_data": "cat:pending-1:sport"} in rows[2]
+    assert rows[-1] == [{"text": "↩️ Cancel", "callback_data": "cnl:pending-1"}]
+
+
+def test_change_for_uncategorized_shows_plain_buttons(aws, telegram):
+    put_txn(aws, "t1")
+
+    app.lambda_handler(callback_event("cnl:t1"), None)
+
+    edit = telegram.edits[0]
+    assert "Category:" not in edit["text"]
+    assert len(edit["markup"]["inline_keyboard"]) == 4
+    assert edit["markup"]["inline_keyboard"][0][0]["text"] == "🍔 Food"
+
+
+@pytest.mark.parametrize("data", ["chg:gone", "cnl:gone"])
+def test_change_for_missing_transaction(aws, telegram, data):
+    app.lambda_handler(callback_event(data), None)
+
+    assert telegram.answers == [{"id": "cb-1", "text": "Transaction no longer exists"}]
+    assert telegram.edits == []
+
+
+def test_change_from_disallowed_user(aws, telegram):
+    put_txn(aws, "t1", expense_category="food")
+
+    app.lambda_handler(callback_event("chg:t1", user_id=999), None)
+
+    assert telegram.answers == [{"id": "cb-1", "text": "Not allowed"}]
+    assert telegram.edits == []
 
 
 def test_telegram_errors_still_return_200(aws, telegram, monkeypatch):

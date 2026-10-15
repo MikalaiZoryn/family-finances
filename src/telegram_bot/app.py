@@ -7,7 +7,6 @@ away; the direct invoke is a fallback sweep.
 """
 
 import hmac
-import html
 import json
 import logging
 import os
@@ -22,6 +21,11 @@ from shared.aws_secrets import get_secret_json
 from shared.categories import CATEGORIES
 from shared.expense_messages import (
     CALLBACK_PREFIX,
+    CANCEL_PREFIX,
+    CHANGE_PREFIX,
+    categorized_keyboard,
+    category_keyboard,
+    format_categorized,
     format_message,
     is_categorizable,
     send_expense,
@@ -121,7 +125,7 @@ def send_uncategorized() -> dict[str, Any]:
 
 
 # ----------------------------------------------------------------------
-# Webhook (category button presses)
+# Webhook (category, Change and Cancel button presses)
 # ----------------------------------------------------------------------
 
 
@@ -213,29 +217,74 @@ def handle_callback(callback_query: dict[str, Any]) -> None:
         return
 
     parts = (callback_query.get("data") or "").split(":")
-    if len(parts) != 3 or parts[0] != CALLBACK_PREFIX or parts[2] not in CATEGORIES:
+    if len(parts) == 3 and parts[0] == CALLBACK_PREFIX and parts[2] in CATEGORIES:
+        _handle_category(client, callback_query, parts[1], parts[2], user_id)
+    elif len(parts) == 2 and parts[0] in (CHANGE_PREFIX, CANCEL_PREFIX) and parts[1]:
+        _handle_change(client, callback_query, parts[1], changing=parts[0] == CHANGE_PREFIX)
+    else:
         client.answer_callback_query(query_id, "Unknown category")
-        return
-    _, transaction_id, category_key = parts
 
+
+def _handle_category(
+    client: TelegramClient,
+    callback_query: dict[str, Any],
+    transaction_id: str,
+    category_key: str,
+    user_id: int,
+) -> None:
+    query_id = callback_query["id"]
     item = _set_category(transaction_id, category_key, user_id)
     if item is None:
         client.answer_callback_query(query_id, "Transaction no longer exists")
         return
 
-    label = CATEGORIES[category_key]
     logger.info(
         "Transaction categorized",
         extra={"transaction_id": item["transaction_id"], "expense_category": category_key},
     )
-    client.answer_callback_query(query_id, f"Saved: {label}")
+    client.answer_callback_query(query_id, f"Saved: {CATEGORIES[category_key]}")
     message = callback_query.get("message")
     if message:
+        # Buttons keep the message's transaction ID; a pending one is followed to its posted row.
         client.edit_message_text(
             message["chat"]["id"],
             message["message_id"],
-            f"{format_message(item)}\n\n✅ Category: <b>{html.escape(label)}</b>",
+            format_categorized(item),
+            reply_markup=categorized_keyboard(transaction_id),
         )
+
+
+def _handle_change(
+    client: TelegramClient, callback_query: dict[str, Any], transaction_id: str, changing: bool
+) -> None:
+    """Show the category buttons again (Change) or go back to the saved category (Cancel)."""
+    query_id = callback_query["id"]
+    item = _get_transaction(_table(), transaction_id)
+    if item is None:
+        client.answer_callback_query(query_id, "Transaction no longer exists")
+        return
+
+    client.answer_callback_query(query_id)
+    message = callback_query.get("message")
+    if not message:
+        return
+    current = item.get("expense_category")
+    if changing or not current:
+        text = format_categorized(item) if current else format_message(item)
+        markup = category_keyboard(transaction_id, current=current)
+    else:
+        text = format_categorized(item)
+        markup = categorized_keyboard(transaction_id)
+    client.edit_message_text(message["chat"]["id"], message["message_id"], text, markup)
+
+
+def _get_transaction(table, transaction_id: str) -> dict[str, Any] | None:
+    item = table.get_item(Key={"transaction_id": transaction_id}).get("Item")
+    if item is None:
+        posted_id = _posted_transaction_id(table, transaction_id)
+        if posted_id:
+            item = table.get_item(Key={"transaction_id": posted_id}).get("Item")
+    return item
 
 
 def _set_category(transaction_id: str, category_key: str, user_id: int) -> dict[str, Any] | None:

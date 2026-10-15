@@ -18,6 +18,8 @@ logger = logging.getLogger()
 
 BUTTONS_PER_ROW = 3
 CALLBACK_PREFIX = "cat"
+CHANGE_PREFIX = "chg"
+CANCEL_PREFIX = "cnl"
 MAX_CALLBACK_DATA_BYTES = 64
 
 # Not expenses the user needs to categorize.
@@ -41,14 +43,27 @@ def callback_data(transaction_id: str, category_key: str) -> str:
     return f"{CALLBACK_PREFIX}:{transaction_id}:{category_key}"
 
 
-def category_keyboard(transaction_id: str) -> dict[str, Any]:
+def category_keyboard(transaction_id: str, current: str | None = None) -> dict[str, Any]:
+    """Category buttons; when changing a category, the current one is ticked and Cancel added."""
     buttons = [
-        {"text": label, "callback_data": callback_data(transaction_id, key)}
+        {
+            "text": f"{label} ✓" if key == current else label,
+            "callback_data": callback_data(transaction_id, key),
+        }
         for key, label in CATEGORIES.items()
     ]
+    rows = [buttons[i : i + BUTTONS_PER_ROW] for i in range(0, len(buttons), BUTTONS_PER_ROW)]
+    if current:
+        rows.append(
+            [{"text": "↩️ Cancel", "callback_data": f"{CANCEL_PREFIX}:{transaction_id}"}]
+        )
+    return {"inline_keyboard": rows}
+
+
+def categorized_keyboard(transaction_id: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [
-            buttons[i : i + BUTTONS_PER_ROW] for i in range(0, len(buttons), BUTTONS_PER_ROW)
+            [{"text": "✏️ Change", "callback_data": f"{CHANGE_PREFIX}:{transaction_id}"}]
         ]
     }
 
@@ -78,6 +93,11 @@ def format_message(item: dict[str, Any]) -> str:
     if item.get("apple_category"):
         lines.append(f"Apple: {html.escape(item['apple_category'])}")
     return "\n".join(lines)
+
+
+def format_categorized(item: dict[str, Any]) -> str:
+    label = CATEGORIES.get(item["expense_category"], item["expense_category"])
+    return f"{format_message(item)}\n\n✅ Category: <b>{html.escape(label)}</b>"
 
 
 def send_expense(client: TelegramClient, table, chat_id: int | str, item: dict[str, Any]) -> bool:

@@ -191,8 +191,10 @@ aws lambda invoke --function-name <TelegramBotFunction name>   --cli-binary-form
 **Button press** — Telegram calls the webhook; the Lambda checks the
 `X-Telegram-Bot-Api-Secret-Token` header and that the user is in
 `ALLOWED_TELEGRAM_USER_IDS`, saves the category, and edits the message to show
-it (buttons removed). A press on a pending transaction that has since posted is
-saved on the posted transaction.
+it with a single **✏️ Change** button. Change brings the category buttons back
+(the saved one ticked, plus **↩️ Cancel**); picking another category overwrites
+the saved one, and the next aggregation run moves the amount. A press on a
+pending transaction that has since posted is saved on the posted transaction.
 
 ## Budget aggregation
 
