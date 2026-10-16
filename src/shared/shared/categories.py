@@ -12,5 +12,7 @@ CATEGORIES = {
     "emotional": "💖 Emotional",
     "sport": "⚽ Sport",
     "transportation": "🚗 Transportation",
+    "vacation": "🏖️ Vacation",
+    "work": "📷 Work",
     "miscellaneous": "📦 Miscellaneous",
 }

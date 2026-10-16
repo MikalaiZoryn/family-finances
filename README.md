@@ -168,8 +168,8 @@ Categories are defined in `src/shared/shared/categories.py` (`CATEGORIES`):
 `household_supply` (Household Supply), `weekends_fun` (Weekends Fun),
 `investment` (Investment), `subscription` (Subscription), `emotional`
 (Emotional), `sport` (Sport), `transportation` (Transportation),
-`miscellaneous` (Miscellaneous). Labels carry an
-emoji icon. The key is stored in `expense_category`; the label is shown on
+`vacation` (Vacation), `work` (Work), `miscellaneous` (Miscellaneous). Labels
+carry an emoji icon. The key is stored in `expense_category`; the label is shown on
 the buttons, three per row (`BUTTONS_PER_ROW`).
 
 **Sending** — new expenses are normally sent by the Plaid sync and the Apple

@@ -243,6 +243,10 @@ def test_message_content_and_buttons(aws, telegram):
             ],
             [
                 {"text": "🚗 Transportation", "callback_data": "cat:t1:transportation"},
+                {"text": "🏖️ Vacation", "callback_data": "cat:t1:vacation"},
+                {"text": "📷 Work", "callback_data": "cat:t1:work"},
+            ],
+            [
                 {"text": "📦 Miscellaneous", "callback_data": "cat:t1:miscellaneous"},
             ],
         ]
@@ -425,7 +429,7 @@ def test_change_for_uncategorized_shows_plain_buttons(aws, telegram):
 
     edit = telegram.edits[0]
     assert "Category:" not in edit["text"]
-    assert len(edit["markup"]["inline_keyboard"]) == 4
+    assert len(edit["markup"]["inline_keyboard"]) == 5
     assert edit["markup"]["inline_keyboard"][0][0]["text"] == "🍔 Food"
 
 
